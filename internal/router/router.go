@@ -181,7 +181,7 @@ func (r *Router) accept(ctx context.Context, e core.Envelope) error {
 	if e.Reply != nil {
 		return r.reply(ctx, s, *e.Reply)
 	}
-	if e.Channel && len(e.Parts) > 0 && e.Parts[0].Type == "text" {
+	if e.Channel && len(e.Parts) > 0 && e.Parts[0].Type == core.PartText {
 		handled, err := r.command(ctx, key, s, e)
 		if handled {
 			return err
@@ -212,25 +212,15 @@ func (r *Router) dispatch(ctx context.Context, s *state, e core.Envelope) error 
 		}
 		e = next
 	}
-	kind := "prompt"
+	mode := core.DeliveryStart
 	if s.busy {
 		if e.Channel {
-			kind = "steer"
+			mode = core.DeliveryInterrupt
 		} else {
-			kind = "follow_up"
+			mode = core.DeliveryQueue
 		}
 	}
-	fields := map[string]any{"envelope": e}
-	for _, p := range e.Parts {
-		if p.Type == "text" && strings.HasPrefix(p.Text, "/") && e.Channel {
-			kind = "prompt"
-			if s.busy {
-				fields["streamingBehavior"] = "steer"
-			}
-			break
-		}
-	}
-	data, err := r.call(ctx, s, core.Command{Type: kind, Fields: fields})
+	result, err := call(ctx, func(ctx context.Context) (core.Submission, error) { return s.backend.Submit(ctx, e, mode) })
 	if err != nil {
 		if errors.Is(err, core.ErrUnavailable) {
 			s.ready = false
@@ -238,9 +228,7 @@ func (r *Router) dispatch(ctx context.Context, s *state, e core.Envelope) error 
 		}
 		return err
 	}
-	var result struct{ Disposition string }
-	_ = json.Unmarshal(data, &result)
-	if result.Disposition != "handled" {
+	if !result.Handled {
 		s.busy = true
 	}
 	if e.Channel {
@@ -249,10 +237,14 @@ func (r *Router) dispatch(ctx context.Context, s *state, e core.Envelope) error 
 	}
 	return nil
 }
-func (r *Router) call(ctx context.Context, s *state, c core.Command) (json.RawMessage, error) {
+func call[T any](ctx context.Context, fn func(context.Context) (T, error)) (T, error) {
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	return s.backend.Call(ctx, c)
+	return fn(ctx)
+}
+func action(ctx context.Context, fn func(context.Context) error) error {
+	_, err := call(ctx, func(ctx context.Context) (struct{}, error) { return struct{}{}, fn(ctx) })
+	return err
 }
 func (r *Router) send(ctx context.Context, source string, e core.Envelope) error {
 	for _, h := range r.opt.Hooks {
@@ -277,13 +269,13 @@ func (r *Router) send(ctx context.Context, source string, e core.Envelope) error
 	return err
 }
 func (r *Router) system(ctx context.Context, s *state, text string) {
-	if err := r.send(ctx, s.source, core.Envelope{Parts: []core.Part{{Type: "text", Text: "[system] " + text}}}); err != nil {
+	if err := r.send(ctx, s.source, core.Envelope{Parts: []core.Part{{Type: core.PartText, Text: "[system] " + text}}}); err != nil {
 		slog.Error("system message delivery failed", "message", text, "error", err)
 	}
 }
 func (r *Router) flush(ctx context.Context, s *state, text string, final bool) {
 	for _, bubble := range s.bubbles.Feed(text, final) {
-		if err := r.send(ctx, s.source, core.Envelope{Parts: []core.Part{{Type: "text", Text: bubble}}}); err != nil {
+		if err := r.send(ctx, s.source, core.Envelope{Parts: []core.Part{{Type: core.PartText, Text: bubble}}}); err != nil {
 			slog.Error("bubble delivery failed", "error", err)
 		}
 	}
@@ -292,6 +284,10 @@ func (r *Router) event(ctx context.Context, key string, s *state, e core.Event) 
 	for _, h := range r.opt.Hooks {
 		copy := e
 		copy.Data = append(json.RawMessage(nil), e.Data...)
+		if e.Tool != nil {
+			tool := *e.Tool
+			copy.Tool = &tool
+		}
 		if e.Dialog != nil {
 			d := *e.Dialog
 			d.Options = append([]string(nil), d.Options...)
@@ -324,13 +320,13 @@ func (r *Router) event(ctx context.Context, key string, s *state, e core.Event) 
 		r.system(ctx, s, e.Text)
 	case "agent_start":
 		s.busy = true
-		if _, err := r.call(ctx, s, core.Command{Type: "get_state"}); err != nil {
+		if _, err := call(ctx, s.backend.Status); err != nil {
 			r.system(ctx, s, err.Error())
 		}
 	case "agent_settled":
 		s.busy = false
 		r.flush(ctx, s, "", true)
-		if _, err := r.call(ctx, s, core.Command{Type: "get_state"}); err != nil {
+		if _, err := call(ctx, s.backend.Status); err != nil {
 			r.system(ctx, s, err.Error())
 		}
 	case "message_update":
@@ -358,11 +354,13 @@ func (r *Router) event(ctx context.Context, key string, s *state, e core.Event) 
 		default:
 			slog.Debug("extension UI", "method", d.Method)
 		}
-	default:
-		if r.opt.ShowTools && strings.HasPrefix(e.Type, "tool_execution_") {
-			r.system(ctx, s, string(e.Data))
+	}
+	if r.opt.ShowTools && e.Tool != nil {
+		if text := toolSummary(*e.Tool); text != "" {
+			r.system(ctx, s, text)
 		}
 	}
+
 }
 func (r *Router) reply(ctx context.Context, s *state, reply core.Reply) error {
 	if strings.HasPrefix(reply.ID, "model:") {
@@ -375,15 +373,16 @@ func (r *Router) reply(ctx context.Context, s *state, reply core.Reply) error {
 		}
 		return r.setModel(ctx, s, value)
 	}
-	_, err := r.call(ctx, s, core.Command{Type: "extension_ui_response", Fields: map[string]any{"id": reply.ID, "value": reply.Value, "confirmed": reply.Confirmed, "cancelled": reply.Cancelled}})
-	return err
+	return action(ctx, func(ctx context.Context) error { return s.backend.Respond(ctx, reply) })
 }
 func (r *Router) setModel(ctx context.Context, s *state, value string) error {
 	provider, model, ok := strings.Cut(value, "/")
 	if !ok || provider == "" || model == "" {
 		return errors.New("use /model provider/model-id")
 	}
-	_, err := r.call(ctx, s, core.Command{Type: "set_model", Fields: map[string]any{"provider": provider, "modelId": model}})
+	err := action(ctx, func(ctx context.Context) error {
+		return s.backend.SetModel(ctx, core.Model{Provider: provider, ID: model})
+	})
 	if err == nil {
 		r.system(ctx, s, "Model selected: "+value)
 	}
@@ -402,20 +401,15 @@ func (r *Router) command(ctx context.Context, key string, s *state, e core.Envel
 			r.system(ctx, s, fmt.Sprintf("Backend restarting. Queue: %d.", len(s.queue)))
 			return true, nil
 		}
-		data, err := r.call(ctx, s, core.Command{Type: "get_state"})
+		st, err := call(ctx, s.backend.Status)
 		if err != nil {
 			return true, err
 		}
-		var st struct {
-			Model               struct{ Provider, ID string }
-			PendingMessageCount int
-		}
-		_ = json.Unmarshal(data, &st)
-		r.system(ctx, s, fmt.Sprintf("Backend ready. Busy: %t. Model: %s/%s. Queue: %d.", s.busy, st.Model.Provider, st.Model.ID, len(s.queue)+st.PendingMessageCount))
+		r.system(ctx, s, fmt.Sprintf("Backend ready. Busy: %t. Model: %s/%s. Queue: %d.", s.busy, st.Model.Provider, st.Model.ID, len(s.queue)+st.PendingMessages))
 		return true, nil
 	case "/restart":
 		if s.ready {
-			_, err := r.call(ctx, s, core.Command{Type: "get_state"})
+			_, err := call(ctx, s.backend.Status)
 			if err != nil {
 				return true, err
 			}
@@ -441,26 +435,20 @@ func (r *Router) command(ctx context.Context, key string, s *state, e core.Envel
 	switch name {
 	case "/abort":
 		s.queue = nil
-		if _, err := r.call(ctx, s, core.Command{Type: "clear_queue"}); err != nil {
-			return true, err
-		}
-		_, err := r.call(ctx, s, core.Command{Type: "abort"})
-		return true, err
+		return true, action(ctx, s.backend.Abort)
 	case "/new":
-		data, err := r.call(ctx, s, core.Command{Type: "new_session"})
+		created, err := call(ctx, s.backend.NewSession)
 		if err != nil {
 			return true, err
 		}
-		var result struct{ Cancelled bool }
-		_ = json.Unmarshal(data, &result)
-		if result.Cancelled {
+		if !created {
 			r.system(ctx, s, "New session cancelled.")
 			return true, nil
 		}
 		s.last = nil
 		s.busy = false
 		s.models = map[string]string{}
-		_, err = r.call(ctx, s, core.Command{Type: "get_state"})
+		_, err = call(ctx, s.backend.Status)
 		if err == nil {
 			r.system(ctx, s, "New session started.")
 		}
@@ -469,19 +457,13 @@ func (r *Router) command(ctx context.Context, key string, s *state, e core.Envel
 		if len(args) > 1 {
 			return true, r.setModel(ctx, s, args[1])
 		}
-		data, err := r.call(ctx, s, core.Command{Type: "get_available_models"})
+		models, err := call(ctx, s.backend.Models)
 		if err != nil {
-			return true, err
-		}
-		var result struct {
-			Models []struct{ Provider, ID string }
-		}
-		if err = json.Unmarshal(data, &result); err != nil {
 			return true, err
 		}
 		d := core.Dialog{ID: "model:" + key, Method: "select", Title: "Choose a model"}
 		s.models = map[string]string{}
-		for _, m := range result.Models {
+		for _, m := range models {
 			value := m.Provider + "/" + m.ID
 			d.Options = append(d.Options, value)
 			s.models[value] = value
@@ -502,4 +484,33 @@ func clone(e core.Envelope) core.Envelope {
 		e.Reply = &reply
 	}
 	return e
+}
+
+// Tool summaries exclude arguments, results and incremental updates. These may
+// be large or contain sensitive content; hooks still receive the full event.
+func toolSummary(tool core.ToolEvent) string {
+	name := strings.Join(strings.Fields(tool.Name), " ")
+	if name == "" {
+		name = "unknown"
+	}
+	runes := []rune(name)
+	if len(runes) > 80 {
+		name = string(runes[:80]) + "…"
+	}
+	switch tool.Phase {
+	case core.ToolStarted:
+		return "Tool started: " + name
+	case core.ToolFinished:
+		status := "completed"
+		if tool.Failed {
+			status = "failed"
+		}
+		text := "Tool " + status + ": " + name
+		if tool.Duration > 0 {
+			text += fmt.Sprintf(" (%s)", tool.Duration.Round(time.Millisecond))
+		}
+		return text
+	default:
+		return ""
+	}
 }

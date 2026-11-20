@@ -12,7 +12,7 @@ type Prefix struct{ Text string }
 
 func (p Prefix) OnInbound(_ context.Context, e core.Envelope) (core.Envelope, bool, error) {
 	if p.Text != "" {
-		parts := []core.Part{{Type: "text", Text: p.Text}}
+		parts := []core.Part{{Type: core.PartText, Text: p.Text}}
 		e.Parts = append(parts, e.Parts...)
 	}
 	return e, false, nil
@@ -29,7 +29,7 @@ func Ticker(ctx context.Context, interval time.Duration, route, text string, inj
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if err := inject(ctx, core.Envelope{Route: route, Parts: []core.Part{{Type: "text", Text: text}}}); err != nil {
+			if err := inject(ctx, core.Envelope{Route: route, Parts: []core.Part{{Type: core.PartText, Text: text}}}); err != nil {
 				slog.Error("ticker injection failed", "error", err)
 			}
 		}

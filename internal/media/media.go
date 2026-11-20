@@ -46,10 +46,7 @@ func (s *Store) relative(path string) (string, error) {
 	}
 	return rel, nil
 }
-func (s *Store) Open(path string) (interface {
-	Read([]byte) (int, error)
-	Close() error
-}, error) {
+func (s *Store) Open(path string) (io.ReadCloser, error) {
 	rel, err := s.relative(path)
 	if err != nil {
 		return nil, err
@@ -78,16 +75,16 @@ func (s *Store) Inspect(path string) (core.Part, error) {
 		mt = "application/octet-stream"
 	}
 	mt = strings.Split(mt, ";")[0]
-	kind := "file"
+	kind := core.PartFile
 	if strings.HasPrefix(mt, "image/") {
-		kind = "image"
+		kind = core.PartImage
 	}
 	if strings.HasPrefix(mt, "audio/") {
-		kind = "audio"
+		kind = core.PartAudio
 	}
 	return core.Part{Type: kind, Path: filepath.Join(s.Dir, rel), MIME: mt, Size: st.Size()}, nil
 }
-func (s *Store) Save(ctx context.Context, name, mt string, r interface{ Read([]byte) (int, error) }, limit int64) (core.Part, error) {
+func (s *Store) Save(ctx context.Context, name, mt string, r io.Reader, limit int64) (core.Part, error) {
 	id := make([]byte, 16)
 	if _, err := rand.Read(id); err != nil {
 		return core.Part{}, err
@@ -171,11 +168,11 @@ func (s *Store) Validate(e core.Envelope) (core.Envelope, error) {
 	}
 	for i, p := range e.Parts {
 		switch p.Type {
-		case "text":
+		case core.PartText:
 			if p.Path != "" {
 				return e, fmt.Errorf("text part cannot contain a path")
 			}
-		case "image", "audio", "file":
+		case core.PartImage, core.PartAudio, core.PartFile:
 			q, err := s.Inspect(p.Path)
 			if err != nil {
 				return e, err

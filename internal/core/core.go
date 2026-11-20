@@ -5,15 +5,26 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"time"
+)
+
+type PartType string
+
+const (
+	PartText  PartType = "text"
+	PartImage PartType = "image"
+	PartAudio PartType = "audio"
+	PartFile  PartType = "file"
 )
 
 type Part struct {
-	Type    string `json:"type" yaml:"type"`
-	Text    string `json:"text,omitempty" yaml:"text,omitempty"`
-	Path    string `json:"path,omitempty" yaml:"path,omitempty"`
-	MIME    string `json:"mime,omitempty" yaml:"mime,omitempty"`
-	Size    int64  `json:"size,omitempty" yaml:"size,omitempty"`
-	Caption string `json:"caption,omitempty" yaml:"caption,omitempty"`
+	Type    PartType `json:"type" yaml:"type"`
+	Text    string   `json:"text,omitempty" yaml:"text,omitempty"`
+	Path    string   `json:"path,omitempty" yaml:"path,omitempty"`
+	MIME    string   `json:"mime,omitempty" yaml:"mime,omitempty"`
+	Size    int64    `json:"size,omitempty" yaml:"size,omitempty"`
+	Caption string   `json:"caption,omitempty" yaml:"caption,omitempty"`
 }
 type Envelope struct {
 	Route   string `json:"route,omitempty"`
@@ -35,10 +46,36 @@ type Event struct {
 	Type, Text string
 	Data       json.RawMessage
 	Dialog     *Dialog
+	Tool       *ToolEvent
 }
-type Command struct {
-	Type   string
-	Fields map[string]any
+
+// DeliveryMode describes scheduling intent, not a backend wire command.
+type DeliveryMode uint8
+
+const (
+	DeliveryStart DeliveryMode = iota
+	DeliveryInterrupt
+	DeliveryQueue
+)
+
+type Submission struct{ Handled bool }
+type Model struct{ Provider, ID string }
+type BackendState struct {
+	Model           Model
+	PendingMessages int
+}
+type ToolPhase uint8
+
+const (
+	ToolStarted ToolPhase = iota
+	ToolFinished
+)
+
+type ToolEvent struct {
+	Name     string
+	Phase    ToolPhase
+	Failed   bool
+	Duration time.Duration
 }
 type Frontend interface {
 	Run(context.Context, func(context.Context, Envelope) error) error
@@ -48,7 +85,13 @@ type Frontend interface {
 }
 type Backend interface {
 	Run(context.Context, func(Event)) error
-	Call(context.Context, Command) (json.RawMessage, error)
+	Submit(context.Context, Envelope, DeliveryMode) (Submission, error)
+	Status(context.Context) (BackendState, error)
+	Models(context.Context) ([]Model, error)
+	SetModel(context.Context, Model) error
+	NewSession(context.Context) (bool, error) // Reports whether the session was created.
+	Abort(context.Context) error              // Discards pending work and stops generation.
+	Respond(context.Context, Reply) error
 	Restart(context.Context) error
 	Close(context.Context) error
 }
@@ -61,12 +104,9 @@ type Hook interface {
 
 // MediaStore keeps adapters independent from filesystem policy implementations.
 type MediaStore interface {
-	Save(context.Context, string, string, interface{ Read([]byte) (int, error) }, int64) (Part, error)
+	Save(context.Context, string, string, io.Reader, int64) (Part, error)
 	Inspect(string) (Part, error)
-	Open(string) (interface {
-		Read([]byte) (int, error)
-		Close() error
-	}, error)
+	Open(string) (io.ReadCloser, error)
 }
 
 var ErrUnavailable = errors.New("backend unavailable")

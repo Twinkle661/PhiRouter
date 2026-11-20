@@ -82,7 +82,7 @@ Unknown slash commands pass through pi's `prompt` command, even while busy, pres
 
 Select and confirm dialogs use inline buttons. Input/editor dialogs use ForceReply: reply to the requested message with your answer. The original message is marked with the selection. Dialog timeouts are owned by pi; expired callbacks are ignored. Model lists larger than a keyboard are split across messages. `notify` is displayed; cosmetic terminal UI events are logged only at debug level.
 
-Text is sent as plain text, not Markdown, to preserve arbitrary model output without Telegram parsing failures. Separators are removed, including when split across RPC events. Empty bubbles are omitted; long bubbles are split conservatively at 4096 UTF-16 units. Completed text is flushed on message/run end and graceful shutdown. Tool events are hidden unless enabled. Telegram 429 responses honor `retry_after` with up to three retries; ambiguous network failures are logged rather than retried automatically, to avoid duplicate messages.
+Text is sent as plain text, not Markdown, to preserve arbitrary model output without Telegram parsing failures. Separators are removed, including when split across RPC events. Empty bubbles are omitted; long bubbles are split conservatively at 4096 UTF-16 units. Completed text is flushed on message/run end and graceful shutdown. Tool events are hidden unless enabled. When enabled, only short start/end summaries are sent (tool name, outcome, and available duration); incremental updates, arguments, and results remain available to hooks but are not posted to Telegram. Telegram 429 responses honor `retry_after` with up to three retries; ambiguous network failures are logged rather than retried automatically, to avoid duplicate messages.
 
 ## Injection API
 
@@ -113,11 +113,15 @@ Supported audio codecs in `.ogg`, `.opus`, `.mp3`, and `.m4a` files use `sendVoi
 
 Two optional built-ins demonstrate the interface: `prefix` adds configured text to inbound prompts, and `ticker` injects text at fixed intervals from startup. Neither is enabled by default. Configure them using the commented example. The ticker is an interval source, not a wall-clock calendar scheduler.
 
+Backend adapters implement typed operations (`Submit`, `Status`, `Models`, `SetModel`, `NewSession`, `Abort`, `Respond`) with typed results. `DeliveryStart`, `DeliveryInterrupt`, and `DeliveryQueue` express scheduling intent; pi wire commands and JSON maps stay private to its adapter. `PartType` constants preserve the existing JSON strings, and `MediaStore` uses `io.Reader`/`io.ReadCloser`.
+
 Dependency direction is enforced by a test: adapters, router, and plugins import `core`, never one another. Composition and implementation selection live in `cmd/router`. The only third-party Go dependency is `gopkg.in/yaml.v3`, for typed YAML parsing and strict known-field validation. Telegram, HTTP, JSON-RPC, subprocess management, dotenv parsing, and UUID generation use the standard library. `gopkg.in/check.v1` appears in `go.sum` as YAML's test dependency only.
 
 ## Reliability and verification
 
 Pi exits trigger exponential restart backoff (1–60 seconds, reset after a minute of stable runtime). The active session pointer is captured on startup, agent start/settle, new session, and explicit restart, then atomically persisted beside pi's state. Failed session restoration is surfaced and retried rather than silently starting a different conversation. Messages received during recovery are replayed FIFO within user/plugin priority classes. Already accepted pi work is not replayed after a crash because acceptance does not prove whether tools ran; the user can `/retry`.
+
+Interactive backend operations have a 20-second caller deadline. A timeout ends that call and removes its pending response waiter; it does not close pi's stdin, kill pi, or replay the operation. Each pi process has one serialized writer, so callers can time out even while stdin is blocked without interrupting a partially written JSONL record. A command whose write has begun may still execute after timeout; treat its outcome as uncertain. Late responses cannot satisfy a different request. Startup session restoration uses the process lifecycle context instead of a fixed RPC deadline, allowing slow extension dialogs; shutdown still cancels it.
 
 SIGTERM stops polling and HTTP admission, flushes buffered bubbles, then closes pi stdin with a bounded wait before killing the child. Errors use `[system]` messages when the frontend is available; delivery failures use structured stdout logs. No durable message queue or exactly-once delivery is promised.
 

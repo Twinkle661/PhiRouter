@@ -30,9 +30,9 @@ type Options struct {
 type Backend struct {
 	opt     Options
 	mu      sync.Mutex
-	writeMu sync.Mutex
 	cmd     *exec.Cmd
 	stdin   io.WriteCloser
+	writes  chan writeRequest
 	pending map[string]chan response
 	seq     atomic.Uint64
 	session string
@@ -47,93 +47,185 @@ type response struct {
 func New(o Options) *Backend {
 	return &Backend{opt: o, pending: map[string]chan response{}, session: o.SessionFile}
 }
-func (b *Backend) Call(ctx context.Context, c core.Command) (json.RawMessage, error) {
-	fields := map[string]any{"type": c.Type}
-	for k, v := range c.Fields {
-		fields[k] = v
-	}
-	if e, ok := fields["envelope"].(core.Envelope); ok {
-		delete(fields, "envelope")
-		message, images, err := b.prompt(e)
-		if err != nil {
-			return nil, err
-		}
-		fields["message"] = message
-		if c.Type == "prompt" {
-			if _, ok := fields["streamingBehavior"]; !ok {
-				behavior := "followUp"
-				if e.Channel {
-					behavior = "steer"
-				}
-				fields["streamingBehavior"] = behavior
+
+type writeRequest struct {
+	ctx    context.Context
+	data   []byte
+	result chan error
+}
+
+// One writer per process preserves JSONL framing. Cancelling a caller does not
+// close stdin: an in-flight record may still finish, and its result is uncertain.
+func writeLoop(w io.WriteCloser, queue <-chan writeRequest, done <-chan struct{}) {
+	defer w.Close()
+	for {
+		select {
+		case <-done:
+			return
+		case req := <-queue:
+			if err := req.ctx.Err(); err != nil {
+				req.result <- err
+				continue
+			}
+			n, err := w.Write(req.data)
+			if err == nil && n != len(req.data) {
+				err = io.ErrShortWrite
+			}
+			req.result <- err
+			if err != nil {
+				return
 			}
 		}
-		if len(images) > 0 {
-			fields["images"] = images
-		}
 	}
-	// prompt atomically starts idle work or applies the requested streaming policy.
-	// Standalone steer/follow_up only queue and can strand work if a run just ended.
-	if c.Type == "steer" || c.Type == "follow_up" {
-		behavior := "steer"
-		if c.Type == "follow_up" {
-			behavior = "followUp"
-			if message, ok := fields["message"].(string); ok && strings.HasPrefix(strings.TrimSpace(message), "/") {
-				return nil, errors.New("plugin slash commands cannot be queued while the backend is busy")
-			}
-		}
-		fields["type"] = "prompt"
-		fields["streamingBehavior"] = behavior
+}
+
+// rpc is private to the pi adapter; wire command names never cross core.
+func (b *Backend) rpc(ctx context.Context, kind string, fields map[string]any) (json.RawMessage, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	record := map[string]any{"type": kind}
+	for k, v := range fields {
+		record[k] = v
 	}
 	id := fmt.Sprintf("r%d", b.seq.Add(1))
-	if c.Type != "extension_ui_response" {
-		fields["id"] = id
+	if kind != "extension_ui_response" {
+		record["id"] = id
+	}
+	raw, err := json.Marshal(record)
+	if err != nil {
+		return nil, err
 	}
 	ch := make(chan response, 1)
 	b.mu.Lock()
-	w := b.stdin
-	proc := b.cmd
-	if w == nil {
+	queue, done := b.writes, b.exited
+	if b.stdin == nil {
 		b.mu.Unlock()
 		return nil, core.ErrUnavailable
 	}
-	if c.Type != "extension_ui_response" {
+	if kind != "extension_ui_response" {
 		b.pending[id] = ch
 	}
 	b.mu.Unlock()
 	defer func() { b.mu.Lock(); delete(b.pending, id); b.mu.Unlock() }()
-	stop := context.AfterFunc(ctx, func() {
-		_ = w.Close()
-		if proc != nil && proc.Process != nil {
-			_ = proc.Process.Kill()
+	req := writeRequest{ctx: ctx, data: append(raw, '\n'), result: make(chan error, 1)}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-done:
+		return nil, core.ErrUnavailable
+	case queue <- req:
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-done:
+		return nil, core.ErrUnavailable
+	case err = <-req.result:
+		if err != nil {
+			return nil, fmt.Errorf("write RPC: %w", err)
 		}
-	})
-	defer stop()
-	raw, err := json.Marshal(fields)
-	if err != nil {
-		return nil, err
 	}
-	b.writeMu.Lock()
-	_, err = w.Write(append(raw, '\n'))
-	b.writeMu.Unlock()
-	if err != nil {
-		return nil, fmt.Errorf("write RPC: %w", err)
-	}
-	if c.Type == "extension_ui_response" {
+	if kind == "extension_ui_response" {
 		return nil, nil
 	}
 	select {
-	case r := <-ch:
-		return r.Data, r.Err
 	case <-ctx.Done():
 		return nil, ctx.Err()
+	case r := <-ch:
+		return r.Data, r.Err
 	}
 }
+
+func (b *Backend) Submit(ctx context.Context, e core.Envelope, mode core.DeliveryMode) (core.Submission, error) {
+	message, images, err := b.prompt(e)
+	if err != nil {
+		return core.Submission{}, err
+	}
+	behavior := "followUp"
+	switch mode {
+	case core.DeliveryStart:
+		if e.Channel {
+			behavior = "steer"
+		}
+	case core.DeliveryInterrupt:
+		behavior = "steer"
+	case core.DeliveryQueue:
+		if strings.HasPrefix(strings.TrimSpace(message), "/") {
+			return core.Submission{}, errors.New("plugin slash commands cannot be queued while the backend is busy")
+		}
+	default:
+		return core.Submission{}, errors.New("unsupported delivery mode")
+	}
+	fields := map[string]any{"message": message, "streamingBehavior": behavior}
+	if len(images) > 0 {
+		fields["images"] = images
+	}
+	data, err := b.rpc(ctx, "prompt", fields)
+	if err != nil {
+		return core.Submission{}, err
+	}
+	var result struct{ Disposition string }
+	if err = json.Unmarshal(data, &result); err != nil {
+		return core.Submission{}, err
+	}
+	return core.Submission{Handled: result.Disposition == "handled"}, nil
+}
+func (b *Backend) Status(ctx context.Context) (core.BackendState, error) {
+	data, err := b.rpc(ctx, "get_state", nil)
+	if err != nil {
+		return core.BackendState{}, err
+	}
+	var result struct {
+		Model               core.Model
+		PendingMessageCount int
+	}
+	if err = json.Unmarshal(data, &result); err != nil {
+		return core.BackendState{}, err
+	}
+	return core.BackendState{Model: result.Model, PendingMessages: result.PendingMessageCount}, nil
+}
+func (b *Backend) Models(ctx context.Context) ([]core.Model, error) {
+	data, err := b.rpc(ctx, "get_available_models", nil)
+	if err != nil {
+		return nil, err
+	}
+	var result struct{ Models []core.Model }
+	err = json.Unmarshal(data, &result)
+	return result.Models, err
+}
+func (b *Backend) SetModel(ctx context.Context, m core.Model) error {
+	_, err := b.rpc(ctx, "set_model", map[string]any{"provider": m.Provider, "modelId": m.ID})
+	return err
+}
+func (b *Backend) NewSession(ctx context.Context) (bool, error) {
+	data, err := b.rpc(ctx, "new_session", nil)
+	if err != nil {
+		return false, err
+	}
+	var result struct{ Cancelled bool }
+	if err = json.Unmarshal(data, &result); err != nil {
+		return false, err
+	}
+	return !result.Cancelled, nil
+}
+func (b *Backend) Abort(ctx context.Context) error {
+	if _, err := b.rpc(ctx, "clear_queue", nil); err != nil {
+		return err
+	}
+	_, err := b.rpc(ctx, "abort", nil)
+	return err
+}
+func (b *Backend) Respond(ctx context.Context, r core.Reply) error {
+	_, err := b.rpc(ctx, "extension_ui_response", map[string]any{"id": r.ID, "value": r.Value, "confirmed": r.Confirmed, "cancelled": r.Cancelled})
+	return err
+}
+
 func (b *Backend) prompt(e core.Envelope) (string, []map[string]string, error) {
 	var text []string
 	var images []map[string]string
 	for _, p := range e.Parts {
-		if p.Type == "text" {
+		if p.Type == core.PartText {
 			text = append(text, p.Text)
 			continue
 		}
@@ -143,7 +235,7 @@ func (b *Backend) prompt(e core.Envelope) (string, []map[string]string, error) {
 		}
 		line := strings.NewReplacer("{path}", q.Path, "{mime}", q.MIME, "{size}", fmt.Sprintf("%.1f MB", float64(q.Size)/1e6)).Replace(b.opt.Attachment)
 		text = append(text, line)
-		if p.Type == "image" && q.Size <= b.opt.InlineMax && b.opt.InlineMax > 0 {
+		if p.Type == core.PartImage && q.Size <= b.opt.InlineMax && b.opt.InlineMax > 0 {
 			f, err := b.opt.Media.Open(q.Path)
 			if err != nil {
 				return "", nil, err
@@ -210,6 +302,12 @@ func (b *Backend) Run(ctx context.Context, emit func(core.Event)) error {
 			b.cmd = cmd
 			b.stdin = stdin
 			b.exited = make(chan struct{})
+			b.writes = make(chan writeRequest)
+			writerDone := make(chan struct{})
+			go func(queue <-chan writeRequest, done <-chan struct{}) {
+				defer close(writerDone)
+				writeLoop(stdin, queue, done)
+			}(b.writes, b.exited)
 			b.mu.Unlock()
 			readDone := make(chan struct{})
 			go func() { defer close(readDone); b.read(stdout, publish) }()
@@ -220,15 +318,16 @@ func (b *Backend) Run(ctx context.Context, emit func(core.Event)) error {
 				b.mu.Lock()
 				close(b.exited)
 				b.mu.Unlock()
+				<-writerDone
 				wait <- err
 			}()
-			callCtx, done := context.WithTimeout(ctx, 30*time.Second)
+			callCtx := ctx // Session restoration may legitimately wait for extension UI.
 			b.mu.Lock()
 			session := b.session
 			b.mu.Unlock()
 			if session != "" {
 				var data json.RawMessage
-				data, err = b.Call(callCtx, core.Command{Type: "switch_session", Fields: map[string]any{"sessionPath": session}})
+				data, err = b.rpc(callCtx, "switch_session", map[string]any{"sessionPath": session})
 				if err == nil {
 					var result struct{ Cancelled bool }
 					_ = json.Unmarshal(data, &result)
@@ -238,9 +337,8 @@ func (b *Backend) Run(ctx context.Context, emit func(core.Event)) error {
 				}
 			}
 			if err == nil {
-				_, err = b.Call(callCtx, core.Command{Type: "get_state"})
+				_, err = b.rpc(callCtx, "get_state", nil)
 			}
-			done()
 			if err == nil {
 				b.mu.Lock()
 				b.ready = true
@@ -373,6 +471,20 @@ func (b *Backend) record(line []byte, emit func(core.Event)) {
 			return
 		}
 		e.Dialog = &core.Dialog{ID: d.ID, Method: d.Method, Title: d.Title, Message: d.Message, Prefill: d.Prefill, Options: d.Options, TimeoutMS: d.Timeout}
+	}
+	if m.Type == "tool_execution_start" || m.Type == "tool_execution_end" {
+		var tool struct {
+			ToolName   string
+			IsError    bool
+			DurationMS float64
+		}
+		if json.Unmarshal(line, &tool) == nil {
+			phase := core.ToolStarted
+			if m.Type == "tool_execution_end" {
+				phase = core.ToolFinished
+			}
+			e.Tool = &core.ToolEvent{Name: tool.ToolName, Phase: phase, Failed: tool.IsError, Duration: time.Duration(tool.DurationMS * float64(time.Millisecond))}
+		}
 	}
 	emit(e)
 	if m.Type == "message_end" {

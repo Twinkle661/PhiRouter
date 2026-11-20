@@ -175,7 +175,7 @@ func (f *Frontend) Run(ctx context.Context, receive func(context.Context, core.E
 				if u.Message != nil && u.Message.From.ID == f.opt.UserID {
 					chat = u.Message.Chat.ID
 				}
-				if e := f.Send(ctx, strconv.FormatInt(chat, 10), core.Envelope{Parts: []core.Part{{Type: "text", Text: "[system] " + err.Error()}}}); e != nil {
+				if e := f.Send(ctx, strconv.FormatInt(chat, 10), core.Envelope{Parts: []core.Part{{Type: core.PartText, Text: "[system] " + err.Error()}}}); e != nil {
 					slog.Error("system message failed", "error", e, "message", err.Error())
 				}
 			}
@@ -232,21 +232,21 @@ func (f *Frontend) handle(ctx context.Context, u update, receive func(context.Co
 	}
 	e := core.Envelope{Source: source}
 	if m.Text != "" {
-		e.Parts = append(e.Parts, core.Part{Type: "text", Text: m.Text})
+		e.Parts = append(e.Parts, core.Part{Type: core.PartText, Text: m.Text})
 	}
 	if m.Caption != "" {
-		e.Parts = append(e.Parts, core.Part{Type: "text", Text: m.Caption})
+		e.Parts = append(e.Parts, core.Part{Type: core.PartText, Text: m.Caption})
 	}
 	var attachment *file
-	kind := "file"
+	kind := core.PartFile
 	if len(m.Photo) > 0 {
 		attachment = &m.Photo[len(m.Photo)-1]
-		kind = "image"
+		kind = core.PartImage
 	}
 	for _, v := range []*file{m.Document, m.Voice, m.Audio, m.Video, m.VideoNote, m.Animation} {
 		if v != nil {
 			attachment = v
-			kind = "file"
+			kind = core.PartFile
 			break
 		}
 	}
@@ -258,10 +258,10 @@ func (f *Frontend) handle(ctx context.Context, u update, receive func(context.Co
 		if err != nil {
 			return err
 		}
-		if kind == "image" || strings.HasPrefix(p.MIME, "image/") {
-			p.Type = "image"
+		if kind == core.PartImage || strings.HasPrefix(p.MIME, "image/") {
+			p.Type = core.PartImage
 		} else {
-			p.Type = "file"
+			p.Type = core.PartFile
 		}
 		e.Parts = append(e.Parts, p)
 	}
@@ -304,7 +304,7 @@ func (f *Frontend) download(ctx context.Context, a file) (core.Part, error) {
 }
 func (f *Frontend) Send(ctx context.Context, chat string, e core.Envelope) error {
 	for _, p := range e.Parts {
-		if p.Type == "text" {
+		if p.Type == core.PartText {
 			for _, text := range chunks(p.Text, 4096) {
 				if strings.TrimSpace(text) == "" {
 					continue

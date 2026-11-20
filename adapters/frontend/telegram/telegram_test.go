@@ -89,7 +89,7 @@ func TestAuthorizationDialogsAndMedia(t *testing.T) {
 		t.Fatal(err)
 	}
 	e := received[1]
-	if len(e.Parts) != 2 || e.Parts[1].Type != "image" || e.Parts[1].Size != 5 {
+	if len(e.Parts) != 2 || e.Parts[1].Type != core.PartImage || e.Parts[1].Size != 5 {
 		t.Fatal(e)
 	}
 	if err = f.handle(ctx, decode(`{"message":{"from":{"id":42},"chat":{"id":42},"document":{"file_id":"large","file_size":20971521}}}`), receive); err == nil {
