@@ -1,0 +1,224 @@
+package router
+
+import (
+	"PhiRouter/internal/core"
+	"context"
+	"encoding/json"
+	"errors"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+type fakeFrontend struct {
+	mu      sync.Mutex
+	texts   []string
+	dialogs []core.Dialog
+}
+
+func (f *fakeFrontend) Run(ctx context.Context, _ func(context.Context, core.Envelope) error) error {
+	<-ctx.Done()
+	return nil
+}
+func (f *fakeFrontend) Send(_ context.Context, _ string, e core.Envelope) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, p := range e.Parts {
+		f.texts = append(f.texts, p.Text)
+	}
+	return nil
+}
+func (f *fakeFrontend) Typing(context.Context, string) error { return nil }
+func (f *fakeFrontend) Dialog(_ context.Context, _ string, d core.Dialog) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.dialogs = append(f.dialogs, d)
+	return nil
+}
+
+type fakeBackend struct {
+	mu    sync.Mutex
+	calls []core.Command
+	fail  bool
+}
+
+func (f *fakeBackend) Run(context.Context, func(core.Event)) error { return nil }
+func (f *fakeBackend) Call(_ context.Context, c core.Command) (json.RawMessage, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.fail {
+		return nil, core.ErrUnavailable
+	}
+	f.calls = append(f.calls, c)
+	return json.RawMessage(`{"disposition":"started","model":{"provider":"test","id":"model"}}`), nil
+}
+func (f *fakeBackend) Restart(context.Context) error { return nil }
+func (f *fakeBackend) Close(context.Context) error   { return nil }
+func (f *fakeBackend) prompts() []core.Command {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []core.Command
+	for _, c := range f.calls {
+		if _, ok := c.Fields["envelope"]; ok {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+func setup(t *testing.T) (*Router, *fakeFrontend, *fakeBackend, context.Context) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	f, b := &fakeFrontend{}, &fakeBackend{}
+	r := New(Options{Routes: []Route{{"fake:*", "test:default"}}, DefaultSource: "fake:1", Separators: []string{"\n", "<break />"}, QueueLimit: 4}, map[string]core.Frontend{"fake": f}, map[string]core.Backend{"test:default": b})
+	go r.Run(ctx)
+	t.Cleanup(func() { cancel(); <-r.done })
+	return r, f, b, ctx
+}
+func env(text string) core.Envelope {
+	return core.Envelope{Route: "test:default", Source: "fake:1", Parts: []core.Part{{Type: "text", Text: text}}}
+}
+func eventually(t *testing.T, fn func() bool) {
+	t.Helper()
+	until := time.Now().Add(2 * time.Second)
+	for time.Now().Before(until) {
+		if fn() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("condition not reached")
+}
+func TestSchedulingAndRecovery(t *testing.T) {
+	r, _, b, ctx := setup(t)
+	for _, e := range []core.Envelope{env("plugin1"), env("plugin2")} {
+		if err := r.Inject(ctx, e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := r.Inbound(ctx, env("user1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Inbound(ctx, env("user2")); err != nil {
+		t.Fatal(err)
+	}
+	r.Event(ctx, "test:default", core.Event{Type: "ready"})
+	eventually(t, func() bool { return len(b.prompts()) == 4 })
+	calls := b.prompts()
+	want := []string{"user1", "user2", "plugin1", "plugin2"}
+	kinds := []string{"prompt", "steer", "follow_up", "follow_up"}
+	for i, c := range calls {
+		if c.Type != kinds[i] || c.Fields["envelope"].(core.Envelope).Parts[0].Text != want[i] {
+			t.Fatalf("call %d: %+v", i, c)
+		}
+	}
+	// agent_end alone must not make pi idle while follow-ups remain.
+	r.Event(ctx, "test:default", core.Event{Type: "agent_end"})
+	if err := r.Inbound(ctx, env("interrupt")); err != nil {
+		t.Fatal(err)
+	}
+	if got := b.prompts()[4].Type; got != "steer" {
+		t.Fatal(got)
+	}
+}
+func TestBubbleBoundaries(t *testing.T) {
+	b := Bubbles{Separators: []string{"\n", "<break />"}, Limit: 4096}
+	if got := b.Feed("hello<bre", false); len(got) != 0 {
+		t.Fatal(got)
+	}
+	got := b.Feed("ak />world\n\nlast", false)
+	if strings.Join(got, "|") != "hello|world" {
+		t.Fatal(got)
+	}
+	if got = b.Feed("", true); len(got) != 1 || got[0] != "last" {
+		t.Fatal(got)
+	}
+	b = Bubbles{Separators: []string{"<break />"}, Limit: 4}
+	got = b.Feed("😀😀😀<break />x", true)
+	if strings.Join(got, "|") != "😀😀|😀|x" {
+		t.Fatal(got)
+	}
+}
+func TestShutdownFlushes(t *testing.T) {
+	r, f, _, ctx := setup(t)
+	r.Event(ctx, "test:default", core.Event{Type: "message_update", Text: "first\nsecond"})
+	eventually(t, func() bool { f.mu.Lock(); defer f.mu.Unlock(); return len(f.texts) == 1 })
+	if err := r.Send(ctx, env("media")); err != nil {
+		t.Fatal(err)
+	}
+	r.Event(ctx, "test:default", core.Event{Type: "message_end"})
+	eventually(t, func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return strings.Join(f.texts, "|") == "first|media|second"
+	})
+}
+
+type badHook struct{}
+
+func (badHook) OnInbound(_ context.Context, e core.Envelope) (core.Envelope, bool, error) {
+	e.Parts[0].Text = "mutated"
+	return e, false, errors.New("hook failure")
+}
+func (badHook) OnOutbound(_ context.Context, e core.Envelope) (core.Envelope, bool, error) {
+	return e, false, nil
+}
+func (badHook) OnEvent(context.Context, string, core.Event) error { return nil }
+func TestHookFailureDoesNotChangeMessage(t *testing.T) {
+	r, _, b, ctx := setup(t)
+	r.opt.Hooks = []core.Hook{badHook{}}
+	r.Event(ctx, "test:default", core.Event{Type: "ready"})
+	if err := r.Inbound(ctx, env("original")); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, func() bool { return len(b.prompts()) == 1 })
+	if got := b.prompts()[0].Fields["envelope"].(core.Envelope).Parts[0].Text; got != "original" {
+		t.Fatal(got)
+	}
+}
+func TestQueueLimitAndUnknownRoute(t *testing.T) {
+	r, _, _, ctx := setup(t)
+	for i := 0; i < 4; i++ {
+		if err := r.Inject(ctx, env("queued")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := r.Inject(ctx, env("overflow")); err == nil {
+		t.Fatal("expected queue full")
+	}
+	e := env("bad")
+	e.Route = "missing"
+	if err := r.Inject(ctx, e); err == nil {
+		t.Fatal("expected unknown route")
+	}
+}
+func TestUnknownSlashUsesPromptWhenBusy(t *testing.T) {
+	r, _, b, ctx := setup(t)
+	r.Event(ctx, "test:default", core.Event{Type: "ready"})
+	_ = r.Inbound(ctx, env("hello"))
+	eventually(t, func() bool { return len(b.prompts()) == 1 })
+	if err := r.Inbound(ctx, env("/extension")); err != nil {
+		t.Fatal(err)
+	}
+	c := b.prompts()[1]
+	if c.Type != "prompt" || c.Fields["streamingBehavior"] != "steer" {
+		t.Fatal(c)
+	}
+}
+
+func TestGracefulShutdownActuallyFlushes(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	f, b := &fakeFrontend{}, &fakeBackend{}
+	r := New(Options{DefaultSource: "fake:1"}, map[string]core.Frontend{"fake": f}, map[string]core.Backend{"test:default": b})
+	go r.Run(ctx)
+	r.Event(ctx, "test:default", core.Event{Type: "message_update", Text: "unfinished bubble"})
+	// A status request is a barrier after the queued event is observed.
+	eventually(t, func() bool { return len(r.events) == 0 })
+	cancel()
+	<-r.done
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.texts) != 1 || f.texts[0] != "unfinished bubble" {
+		t.Fatalf("lost buffered text: %v", f.texts)
+	}
+}

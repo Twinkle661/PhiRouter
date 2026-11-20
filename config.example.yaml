@@ -1,0 +1,43 @@
+debug: false
+
+frontends:
+  telegram:
+    type: telegram
+
+backends:
+  default:
+    type: pi
+    command: ["pi", "--mode", "rpc"]
+    # session_file: /home/node/.pi/agent/sessions/example.jsonl
+
+routes:
+  - from: "telegram:*"
+    to: "pi:default"
+
+stream:
+  separators: ["\n", "<break />"]
+  show_tool_calls: false
+
+media:
+  dir: /data/media
+  inline_image_max_mb: 5
+  ttl: 24h
+  voice_max_seconds: 60
+
+api:
+  listen: "127.0.0.1:8080"
+mcp:
+  listen: "127.0.0.1:8081"
+
+prompts:
+  attachment: "[attachment: {path} ({mime}, {size})]"
+
+queue_limit: 256
+plugins: []
+# plugins:
+#   - type: prefix
+#     prefix: "Reply briefly."
+#   - type: ticker
+#     interval: 24h
+#     route: pi:default
+#     text: "Check whether the user needs a daily reminder."
