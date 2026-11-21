@@ -21,7 +21,7 @@ The architecture is built for **many backends × many frontends**. The first rel
 - **Interrupts and priorities**: user messages steer a busy agent; plugin messages queue behind it; `/abort` really stops.
 - **Interactive dialogs**: the backend's select / confirm / input prompts become inline buttons and replies.
 - **Proactive messages**: an authenticated HTTP injection API lets external processes (schedulers, reminder bots) start a turn.
-- **Agent → user file delivery**: a built-in MCP server gives the agent a `send_file` tool.
+- **Agent → user delivery**: a built-in MCP server gives the agent a `send_file` tool and, optionally, `send_voice` (text-to-speech through any OpenAI-compatible speech endpoint).
 - **Hooks**: in-process plugins can transform or drop inbound/outbound messages and observe events.
 - **Webhook ingress**: frontends that receive platform events over HTTP get a dedicated listener that only starts when used.
 - **Recovery**: the backend process is supervised, its session is persisted and restored, and messages received during recovery are replayed.
@@ -61,9 +61,11 @@ internal/config/            env > .env > YAML > defaults
 internal/media/             confined media store, TTL cleanup
 internal/api/               injection API, /healthz, /status
 internal/ingress/           webhook listener for frontends that need one
-internal/mcp/               MCP server exposing send_file
+internal/mcp/               MCP protocol server and tool registry
+internal/tools/             MCP tools (send_file, send_voice)
 adapters/backend/pi/        pi RPC backend
 adapters/frontend/telegram/ Telegram frontend
+adapters/tts/openaispeech/  OpenAI-compatible speech provider
 plugins/                    optional built-in hooks (prefix, ticker)
 ```
 
@@ -226,7 +228,7 @@ Text is sent as plain text (no Markdown) so arbitrary model output never trigger
 
 ### Attachments
 
-Incoming files are saved under `media.dir/in/` with random UUID names and passed to the agent as a text line (`prompts.attachment`, e.g. `[attachment: /data/media/in/<uuid>.pdf (application/pdf, 12.3 MB)]`). Audio and video are treated as ordinary files: no STT, TTS or document parsing. Files under `in/` and `out/` are removed after `media.ttl`. Image thresholds and download limits use MiB; displayed sizes use decimal MB.
+Incoming files are saved under `media.dir/in/` with random UUID names and passed to the agent as a text line (`prompts.attachment`, e.g. `[attachment: /data/media/in/<uuid>.pdf (application/pdf, 12.3 MB)]`). Incoming audio and video are treated as ordinary files: no STT or document parsing. Files under `in/` and `out/` are removed after `media.ttl`. Image thresholds and download limits use MiB; displayed sizes use decimal MB.
 
 ## Integrations
 
@@ -250,18 +252,62 @@ curl -X POST http://127.0.0.1:8080/v1/inject \
 
 Requests are capped at 1 MiB. Part types are `text`, `image`, `audio` and `file`; non-text parts must reference an existing absolute path inside the media directory, and MIME/size are computed from the file rather than trusted. The API is inbound-only: no outgoing content is exposed. `/healthz` reports router liveness (healthy even during backend recovery); `/status` reports backend readiness.
 
-### MCP file delivery
+### MCP tools
 
-The router serves a stateless Streamable HTTP MCP endpoint at `/mcp` (`initialize`, `ping`, `tools/list`, `tools/call`; protocol versions 2025-03-26, 2025-06-18 and 2025-11-25) with one tool:
+The router serves a stateless Streamable HTTP MCP endpoint at `/mcp` (`initialize`, `ping`, `tools/list`, `tools/call`; protocol versions 2025-03-26, 2025-06-18 and 2025-11-25). `send_file` is always available; `send_voice` is opt-in.
+
+- On startup the router atomically merges a reserved `phirouter` entry into `~/.pi/agent/mcp.json`, preserving your other servers. Tokens are stored as environment references, not plaintext.
+- Each backend process gets `PHIROUTER_BACKEND` in its environment, which becomes the `X-PhiRouter-Route` header, so one endpoint serves many backends and files go back to the right chat.
+- The MCP token is separate from the injection token. Cross-origin requests are rejected. Paths are opened through Go's `os.Root`, so traversal and escaping symlinks are refused.
+
+#### `send_file`
 
 ```json
 {"name":"send_file","arguments":{"path":"/data/media/out/report.pdf","caption":"Report"}}
 ```
 
-- On startup the router atomically merges a reserved `phirouter` entry into `~/.pi/agent/mcp.json`, preserving your other servers. Tokens are stored as environment references, not plaintext.
-- Each backend process gets `PHIROUTER_BACKEND` in its environment, which becomes the `X-PhiRouter-Route` header, so one endpoint serves many backends and files go back to the right chat.
-- The MCP token is separate from the injection token. Cross-origin requests are rejected. Paths are opened through Go's `os.Root`, so traversal and escaping symlinks are refused.
-- Audio in `.ogg`, `.opus`, `.mp3` or `.m4a` is sent as a voice message only when ffprobe confirms audio-only content shorter than `media.voice_max_seconds` (max 60). Everything else, images included, goes out as a document with original bytes. Captions are limited to 1024 UTF-16 units. Delivery does not wait for generation to finish.
+- Audio in `.ogg`, `.opus`, `.mp3` or `.m4a` is sent as a voice message only when ffprobe confirms audio-only content shorter than the Telegram option `voice_max_seconds` (max 60). Everything else, images included, goes out as a document with original bytes. Captions are limited to 1024 UTF-16 units. Delivery does not wait for generation to finish.
+
+#### `send_voice`
+
+```json
+{"name":"send_voice","arguments":{"text":"Good night.","style":"sleepy and tender"}}
+```
+
+The router synthesizes `text`, sends the audio through the same path as `send_file` (a voice message if short enough, otherwise a file) and deletes it once delivered; the agent only gets the result. With `style.enabled`, the tool also accepts an optional `style` describing how to say this message (emotion, mood, pace; not voice characteristics). It is appended to `style.base` and written to the request field named by the provider's `style_field`.
+
+```yaml
+mcp:
+  tools:
+    send_voice:
+      enabled: true
+      style:
+        enabled: true
+        base: ""
+      provider:
+        type: openai_speech
+        options:
+          base_url: https://openrouter.ai/api/v1
+          model: openai/gpt-4o-mini-tts-2025-12-15
+          voice: nova
+          response_format: mp3
+          style_field: instructions
+```
+
+Set the key with `ROUTER_MCP__TOOLS__SEND_VOICE__PROVIDER__OPTIONS__API_KEY`. `openai_speech` works with any `POST {base_url}/audio/speech` endpoint (OpenRouter, OpenAI, DeepInfra's `/v1/openai`, self-hosted servers):
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `base_url` | `https://openrouter.ai/api/v1` | API root; `/audio/speech` is appended. |
+| `api_key` | empty | Bearer token; omitted when empty. |
+| `model`, `voice` | required | Provider-specific identifiers. |
+| `response_format` | `mp3` | `mp3` or `opus`, the formats Telegram plays as voice. |
+| `speed` | `0` | Omitted when `0`, otherwise 0.25–4. |
+| `style_field` | `instructions` | Dot path in the request body that receives style text, e.g. `provider.options.<slug>.<field>` for provider-specific fields. Only some models honour style; disable it otherwise. |
+| `extra_body` | `{}` | Merged into every request; standard fields win. |
+| `timeout` | `60s` | Whole-request timeout. |
+
+Provider errors (bad key, unknown voice) are returned to the agent as tool errors. Other protocol families (for example ElevenLabs) can be added as new provider types in `cmd/router/tools.go`.
 
 Inspect the connection inside the container:
 

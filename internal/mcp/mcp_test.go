@@ -49,6 +49,13 @@ func TestMCPProtocolAndFiles(t *testing.T) {
 	if response["result"].(map[string]any)["protocolVersion"] != "2025-03-26" {
 		t.Fatal(response)
 	}
+	tools := call(`{"jsonrpc":"2.0","id":9,"method":"tools/list"}`)["result"].(map[string]any)["tools"].([]any)
+	if len(tools) != 1 || tools[0].(map[string]any)["name"] != "send_file" {
+		t.Fatal(tools)
+	}
+	if call(`{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"send_voice","arguments":{"text":"x"}}}`)["error"] == nil {
+		t.Fatal("unregistered tool callable")
+	}
 	body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": map[string]any{"name": "send_file", "arguments": map[string]string{"path": path}}})
 	call(string(body))
 	response = call(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"send_file","arguments":{"path":"/etc/passwd"}}}`)

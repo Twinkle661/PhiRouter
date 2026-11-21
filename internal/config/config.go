@@ -47,7 +47,7 @@ type Config struct {
 		TTL              time.Duration `yaml:"ttl"`
 	} `yaml:"media"`
 	API Endpoint `yaml:"api"`
-	MCP Endpoint `yaml:"mcp"`
+	MCP MCP      `yaml:"mcp"`
 	// Ingress serves webhook endpoints for frontends that declare an
 	// ingress path. It may bind publicly and only starts when used.
 	Ingress struct {
@@ -59,6 +59,60 @@ type Config struct {
 	Plugins    []Plugin `yaml:"plugins"`
 	QueueLimit int      `yaml:"queue_limit"`
 }
+
+// MCP configures the built-in MCP server and its optional tools.
+type MCP struct {
+	Listen string `yaml:"listen"`
+	Token  string `yaml:"token"`
+	Tools  struct {
+		SendVoice SendVoice `yaml:"send_voice"`
+	} `yaml:"tools"`
+}
+
+// SendVoice configures the send_voice tool: text is synthesized by Provider
+// and delivered to the user as audio.
+type SendVoice struct {
+	Enabled  bool     `yaml:"enabled"`
+	Provider Provider `yaml:"provider"`
+	// Style lets the agent describe the delivery (emotion, tone) of each
+	// message. The agent's text is appended to Base; the provider decides
+	// where the combined text goes in its request.
+	Style struct {
+		Enabled bool   `yaml:"enabled"`
+		Base    string `yaml:"base"`
+	} `yaml:"style"`
+}
+
+// Provider is a typed adapter instance like Frontend: Options holds a pointer
+// to the options struct registered for Type, decoded strictly by Load.
+type Provider struct {
+	Type    string `yaml:"type"`
+	Options any    `yaml:"options"`
+	raw     *yaml.Node
+}
+
+func (p *Provider) UnmarshalYAML(n *yaml.Node) error {
+	aux := struct {
+		Type    string    `yaml:"type"`
+		Options yaml.Node `yaml:"options"`
+	}{Type: p.Type}
+	if err := strict(n, &aux); err != nil {
+		return err
+	}
+	p.Type, p.Options, p.raw = aux.Type, nil, nil
+	if aux.Options.Kind != 0 {
+		p.raw = &aux.Options
+	}
+	return nil
+}
+
+// ProviderType describes a provider adapter's options contract. NewOptions
+// returns a pointer to its options struct filled with defaults; if that has a
+// Validate() error method, Validate calls it.
+type ProviderType struct {
+	NewOptions func() any
+}
+type ProviderRegistry map[string]ProviderType
 
 // Frontend is one frontend instance. Options holds a pointer to the options
 // struct registered for Type; Load decodes it strictly.
@@ -141,11 +195,12 @@ func Defaults() Config {
 	c.Media.TTL = 24 * time.Hour
 	c.API.Listen = "127.0.0.1:8080"
 	c.MCP.Listen = "127.0.0.1:8081"
+	c.MCP.Tools.SendVoice.Provider.Type = "openai_speech"
 	c.Prompts.Attachment = "[attachment: {path} ({mime}, {size})]"
 	c.QueueLimit = 256
 	return c
 }
-func Load(path, dotenv string, reg Registry) (Config, error) {
+func Load(path, dotenv string, reg Registry, providers ProviderRegistry) (Config, error) {
 	c := Defaults()
 	raw, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
@@ -180,12 +235,16 @@ func Load(path, dotenv string, reg Registry) (Config, error) {
 		}
 		return keys[i] < keys[j]
 	})
-	// Frontend options are typed by their frontend's type, which may itself
+	// Adapter options are typed by their instance's type, which may itself
 	// come from the environment, so they are materialized between two passes.
-	isOptions := func(path []string) bool { return len(path) >= 3 && path[0] == "frontends" && path[2] == "options" }
+	isOptions := func(path []string) bool {
+		frontend := len(path) >= 3 && path[0] == "frontends" && path[2] == "options"
+		provider := len(path) >= 5 && path[0] == "mcp" && path[1] == "tools" && path[3] == "provider" && path[4] == "options"
+		return frontend || provider
+	}
 	for _, pass := range []bool{false, true} {
 		if pass {
-			if err = c.materialize(reg); err != nil {
+			if err = c.materialize(reg, providers); err != nil {
 				return c, err
 			}
 		}
@@ -199,7 +258,7 @@ func Load(path, dotenv string, reg Registry) (Config, error) {
 			}
 		}
 	}
-	if err = c.Validate(reg); err != nil {
+	if err = c.Validate(reg, providers); err != nil {
 		return c, err
 	}
 	if c.Timestamp.Enabled {
@@ -209,8 +268,23 @@ func Load(path, dotenv string, reg Registry) (Config, error) {
 	return c, nil
 }
 
-// materialize decodes each frontend's options into its registered type.
-func (c *Config) materialize(reg Registry) error {
+// materialize decodes each adapter instance's options into its registered type.
+func (c *Config) materialize(reg Registry, providers ProviderRegistry) error {
+	if p := &c.MCP.Tools.SendVoice.Provider; p.Options == nil && p.Type != "" {
+		t, ok := providers[p.Type]
+		switch {
+		case ok:
+			p.Options = t.NewOptions()
+			if p.raw != nil {
+				if err := strict(p.raw, p.Options); err != nil {
+					return fmt.Errorf("mcp.tools.send_voice.provider options: %w", err)
+				}
+				p.raw = nil
+			}
+		case c.MCP.Tools.SendVoice.Enabled || p.raw != nil:
+			return fmt.Errorf("mcp.tools.send_voice.provider: unknown type %q", p.Type)
+		}
+	}
 	for name, f := range c.Frontends {
 		if f.Options != nil {
 			continue
@@ -317,7 +391,7 @@ func set(v reflect.Value, path []string, raw string) error {
 var instanceName = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 var ingressPath = regexp.MustCompile(`^(/[A-Za-z0-9._~-]+)+$`)
 
-func (c Config) Validate(reg Registry) error {
+func (c Config) Validate(reg Registry, providers ProviderRegistry) error {
 	if c.Timestamp.Enabled {
 		if strings.TrimSpace(c.Timestamp.Timezone) == "" || strings.TrimSpace(c.Timestamp.Format) == "" {
 			return fmt.Errorf("timestamp.timezone and timestamp.format must not be empty when enabled")
@@ -329,7 +403,7 @@ func (c Config) Validate(reg Registry) error {
 	if c.API.Token == "" || c.MCP.Token == "" || c.API.Token == c.MCP.Token {
 		return fmt.Errorf("api.token and mcp.token must be nonempty and different")
 	}
-	for name, ep := range map[string]Endpoint{"api": c.API, "mcp": c.MCP} {
+	for name, ep := range map[string]Endpoint{"api": c.API, "mcp": {Listen: c.MCP.Listen, Token: c.MCP.Token}} {
 		h, p, err := net.SplitHostPort(ep.Listen)
 		if err != nil {
 			return fmt.Errorf("invalid %s.listen", name)
@@ -364,6 +438,16 @@ func (c Config) Validate(reg Registry) error {
 	for _, s := range c.Stream.Separators {
 		if s == "" {
 			return fmt.Errorf("stream separators must not be empty")
+		}
+	}
+	if v := c.MCP.Tools.SendVoice; v.Enabled {
+		if _, ok := providers[v.Provider.Type]; !ok {
+			return fmt.Errorf("mcp.tools.send_voice.provider: unknown type %q", v.Provider.Type)
+		}
+		if o, ok := v.Provider.Options.(interface{ Validate() error }); ok {
+			if err := o.Validate(); err != nil {
+				return fmt.Errorf("mcp.tools.send_voice.provider options: %w", err)
+			}
 		}
 	}
 	if len(c.Frontends) == 0 {
