@@ -35,6 +35,7 @@ type Config struct {
 	Routes    []Route             `yaml:"routes"`
 	Telegram  struct {
 		SystemPrefix string `yaml:"system_prefix"`
+		SystemStyle  string `yaml:"system_style"`
 		Token        string `yaml:"token"`
 		UserID       int64  `yaml:"user_id"`
 	} `yaml:"telegram"`
@@ -84,6 +85,7 @@ func Defaults() Config {
 	c.Backends = map[string]Backend{"default": {Type: "pi", Command: []string{"pi", "--mode", "rpc"}}}
 	c.Routes = []Route{{"telegram:*", "pi:default"}}
 	c.Telegram.SystemPrefix = "𝑴𝒆𝒐𝒘☕︎"
+	c.Telegram.SystemStyle = "auto"
 	c.Stream.Separators = []string{"\n", "<break />"}
 	c.Media.Dir = "/data/media"
 	c.Media.InlineImageMaxMB = 5
@@ -238,6 +240,11 @@ func (c Config) Validate() error {
 	}
 	if c.Telegram.Token == "" || c.Telegram.UserID <= 0 {
 		return fmt.Errorf("telegram.token and positive telegram.user_id are required")
+	}
+	switch c.Telegram.SystemStyle {
+	case "full", "compact", "auto":
+	default:
+		return fmt.Errorf("telegram.system_style must be full, compact or auto")
 	}
 	if c.API.Token == "" || c.MCP.Token == "" || c.API.Token == c.MCP.Token {
 		return fmt.Errorf("api.token and mcp.token must be nonempty and different")

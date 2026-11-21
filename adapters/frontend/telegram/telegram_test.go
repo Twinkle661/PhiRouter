@@ -214,3 +214,55 @@ func TestMessageDateBecomesEnvelopeTime(t *testing.T) {
 		}
 	}
 }
+
+func TestSystemStyles(t *testing.T) {
+	var texts []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct{ Text string }
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		texts = append(texts, body.Text)
+		fmt.Fprint(w, `{"ok":true,"result":{"message_id":1}}`)
+	}))
+	defer server.Close()
+	ctx := context.Background()
+	full := "𝑴𝒆𝒐𝒘☕︎ · System\n━━━━━━━━━━━━\n"
+	for _, tc := range []struct {
+		style, prefix, text, want string
+	}{
+		{"", "𝑴𝒆𝒐𝒘☕︎", "Tool completed: read", full + "Tool completed: read"},
+		{SystemStyleFull, "𝑴𝒆𝒐𝒘☕︎", "Tool completed: read", full + "Tool completed: read"},
+		{SystemStyleCompact, "𝑴𝒆𝒐𝒘☕︎", "Tool completed: read", "𝑴𝒆𝒐𝒘☕︎ · Tool completed: read"},
+		{SystemStyleCompact, "", "Tool started: bash", "System · Tool started: bash"},
+		{SystemStyleAuto, "𝑴𝒆𝒐𝒘☕︎", "Tool started: bash", "𝑴𝒆𝒐𝒘☕︎ · Tool started: bash"},
+		{SystemStyleAuto, "𝑴𝒆𝒐𝒘☕︎", "Model updated\n\nModel: x", full + "Model updated\n\nModel: x"},
+	} {
+		texts = nil
+		f := New(Options{BaseURL: server.URL, SystemPrefix: tc.prefix, SystemStyle: tc.style})
+		if err := f.Send(ctx, "42", core.Envelope{System: true, Parts: []core.Part{{Type: core.PartText, Text: tc.text}}}); err != nil {
+			t.Fatal(err)
+		}
+		if len(texts) != 1 || texts[0] != tc.want {
+			t.Fatalf("style %q: got %q, want %q", tc.style, texts, tc.want)
+		}
+	}
+	// Long compact notices still respect Telegram's limit.
+	texts = nil
+	f := New(Options{BaseURL: server.URL, SystemPrefix: "𝑴𝒆𝒐𝒘☕︎", SystemStyle: SystemStyleAuto})
+	if err := f.Send(ctx, "42", core.Envelope{System: true, Parts: []core.Part{{Type: core.PartText, Text: strings.Repeat("🐈", 5000)}}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, text := range texts {
+		if len(chunks(text, 4096)) != 1 {
+			t.Fatal("oversized Telegram message")
+		}
+	}
+	// An edited dialog keeps the style it was sent with.
+	if got := f.selectedText(answer{title: "Choose a model", compact: true}, "a/b"); got != "𝑴𝒆𝒐𝒘☕︎ · Choose a model → a/b" {
+		t.Fatalf("compact selection %q", got)
+	}
+	if got := f.selectedText(answer{title: "Choose a model"}, "a/b"); got != full+"Choose a model\n\nSelected: a/b" {
+		t.Fatalf("full selection %q", got)
+	}
+}
