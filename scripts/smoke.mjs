@@ -15,7 +15,7 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 try {
   let healthy = false;
   for (let i = 0; i < 100; i++) {
-    try { healthy = (await fetch('http://127.0.0.1:8080/healthz')).ok; } catch {}
+    try { healthy = (await fetch('http://127.0.0.1:3710/healthz')).ok; } catch {}
     if (healthy) break;
     await sleep(100);
   }

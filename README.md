@@ -87,9 +87,9 @@ cp .env.example .env
 # (e.g. `openssl rand -hex 32`).
 docker compose build
 # Log pi in once: run /login, pick your provider, then /exit.
-docker compose run --rm --entrypoint pi router
+docker compose run --rm --entrypoint pi phirouter
 docker compose up -d
-docker compose logs -f router
+docker compose logs -f phirouter
 ```
 
 Open a private chat with your bot and send a message. Telegram requires you to contact the bot once before it can send you proactive messages.
@@ -99,7 +99,7 @@ Deployment notes:
 - Router and pi run in **one container** as the non-root `node` user; the router spawns pi as a child process.
 - Two kinds of host directories are bind-mounted. `./router` holds what the router persists: `config.yaml` and `state/<backend name>/` (pi's session pointer, an ACP session ID); `state.dir` is relative to the config file. Each backend's own home is mounted where that agent looks by default, e.g. `./pi` at `~/.pi/agent` for pi's login, sessions, extensions and `mcp.json`. To add Codex, install it in a derived image and uncomment the `./codex` mount; other agents work the same way.
 - Media files are temporary (`media.ttl`) and stay inside the container.
-- The injection API is reachable by sibling containers at `http://router:8080` but is **not published to the host**. To reach it from the host, add a loopback-only mapping (`127.0.0.1:8080:8080`). Never publish it on a public interface. MCP stays bound to `127.0.0.1:8081` inside the container.
+- The injection API is reachable by sibling containers at `http://phirouter:3710` but is **not published to the host**. To reach it from the host, add a loopback-only mapping (`127.0.0.1:3710:3710`). Never publish it on a public interface. MCP stays bound to `127.0.0.1:8081` inside the container.
 - To use provider API keys instead of interactive login, add the provider's variable (e.g. `ANTHROPIC_API_KEY`) to `.env`; Compose passes it to pi.
 - The image pins **pi 1.6.0** on the Node 22 line (pi needs Node ≥ 22.19) and builds with Go 1.26. Upgrading pi means re-checking its RPC contract and running the tests.
 
@@ -119,7 +119,7 @@ pi            # run /login once
 ./bin/router -config config.yaml -env .env
 ```
 
-Backend `command` arrays are executed directly, without a shell. `./bin/router -healthcheck http://127.0.0.1:8080/healthz` probes a running router without loading credentials. Local `-env` loading only applies `ROUTER_*` variables, so export provider credentials in your shell when running outside Docker.
+Backend `command` arrays are executed directly, without a shell. `./bin/router -healthcheck http://127.0.0.1:3710/healthz` probes a running router without loading credentials. Local `-env` loading only applies `ROUTER_*` variables, so export provider credentials in your shell when running outside Docker.
 
 ## Configuration
 
@@ -295,7 +295,7 @@ Incoming files are saved under `media.dir/in/` with random UUID names and passed
 External processes can start turns, for example a reminder scheduler or a proactive-messaging service:
 
 ```sh
-curl -X POST http://127.0.0.1:8080/v1/inject \
+curl -X POST http://127.0.0.1:3710/v1/inject \
   -H "Authorization: Bearer $ROUTER_API__TOKEN" \
   -H 'Content-Type: application/json' \
   --data '{"route":"default","parts":[{"type":"text","text":"Say good morning."}]}'
@@ -370,7 +370,7 @@ Provider errors (bad key, unknown voice) are returned to the agent as tool error
 Inspect the connection inside the container:
 
 ```sh
-docker compose exec -e PHIROUTER_BACKEND=default router pi mcp list
+docker compose exec -e PHIROUTER_BACKEND=default phirouter pi mcp list
 ```
 
 ### Plugins

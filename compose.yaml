@@ -7,7 +7,7 @@ services:
     stop_grace_period: 60s
     env_file: .env
     environment:
-      ROUTER_API__LISTEN: "0.0.0.0:8080"
+      ROUTER_API__LISTEN: "0.0.0.0:3710"
     # Host directories must be writable by the container's node user (uid 1000).
     volumes:
       # Router data: config.yaml and per-backend state (session pointers).
@@ -17,4 +17,4 @@ services:
       # - ./codex:/home/node/.codex   # Codex CLI (needs an image with codex installed)
     # Reachable by other containers on this network, not published to the host.
     expose:
-      - "8080"
+      - "3710"

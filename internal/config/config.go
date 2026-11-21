@@ -256,7 +256,7 @@ func Defaults() Config {
 	c.Media.Dir = "/data/media"
 	c.State.Dir = "state"
 	c.Media.TTL = 24 * time.Hour
-	c.API.Listen = "127.0.0.1:8080"
+	c.API.Listen = "127.0.0.1:3710"
 	c.MCP.Listen = "127.0.0.1:8081"
 	c.MCP.Tools.SendVoice.Provider.Type = "openai_speech"
 	c.QueueLimit = 256
