@@ -191,3 +191,26 @@ func TestSystemNoticesAndAgentText(t *testing.T) {
 		t.Fatal("dialog missing system header")
 	}
 }
+
+func TestMessageDateBecomesEnvelopeTime(t *testing.T) {
+	f := New(Options{Token: "test", UserID: 42})
+	for _, tc := range []struct {
+		raw  string
+		want int64
+	}{
+		{`{"message":{"date":1795000000,"from":{"id":42},"chat":{"id":42},"text":"hi"}}`, 1795000000},
+		{`{"message":{"from":{"id":42},"chat":{"id":42},"text":"hi"}}`, 0},
+	} {
+		var u update
+		if err := json.Unmarshal([]byte(tc.raw), &u); err != nil {
+			t.Fatal(err)
+		}
+		var got core.Envelope
+		if err := f.handle(context.Background(), u, func(_ context.Context, e core.Envelope) error { got = e; return nil }); err != nil {
+			t.Fatal(err)
+		}
+		if tc.want == 0 && !got.Time.IsZero() || tc.want != 0 && got.Time.Unix() != tc.want {
+			t.Fatalf("time %v, want %d", got.Time, tc.want)
+		}
+	}
+}

@@ -47,3 +47,43 @@ func TestValidation(t *testing.T) {
 		t.Fatal("empty delimiter accepted")
 	}
 }
+
+func TestTimestampConfiguration(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("telegram:\n  token: test\n  user_id: 1\napi:\n  token: a\nmcp:\n  token: b\ntimestamp:\n  enabled: true\n  timezone: Europe/London\n  format: '[15:04] '\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path, filepath.Join(dir, ".env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Timestamp.Enabled || c.Timestamp.Timezone != "Europe/London" || c.Timestamp.Format != "[15:04] " || c.Timestamp.Location == nil || c.Timestamp.Location.String() != "Europe/London" {
+		t.Fatalf("incorrect config: %+v", c.Timestamp)
+	}
+	t.Setenv("ROUTER_TIMESTAMP__TIMEZONE", "Asia/Shanghai")
+	t.Setenv("ROUTER_TIMESTAMP__FORMAT", "15:04\n")
+	c, err = Load(path, filepath.Join(dir, ".env"))
+	if err != nil || c.Timestamp.Timezone != "Asia/Shanghai" || c.Timestamp.Format != "15:04\n" || c.Timestamp.Location.String() != "Asia/Shanghai" {
+		t.Fatalf("override failed: %+v %v", c.Timestamp, err)
+	}
+	for _, zone := range []string{"", "Invalid/Zone"} {
+		c.Timestamp.Timezone = zone
+		if c.Validate() == nil {
+			t.Fatalf("accepted timezone %q", zone)
+		}
+	}
+	c.Timestamp.Timezone = "UTC"
+	c.Timestamp.Format = ""
+	if c.Validate() == nil {
+		t.Fatal("accepted empty format")
+	}
+	c.Timestamp.Enabled = false
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	defaults := Defaults()
+	if defaults.Timestamp.Enabled || defaults.Timestamp.Timezone != "UTC" || defaults.Timestamp.Format == "" {
+		t.Fatal("incorrect defaults")
+	}
+}

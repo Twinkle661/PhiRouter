@@ -59,6 +59,7 @@ type file struct {
 }
 type message struct {
 	ID   int64 `json:"message_id"`
+	Date int64 `json:"date"`
 	From user  `json:"from"`
 	Chat struct {
 		ID   int64  `json:"id"`
@@ -232,6 +233,9 @@ func (f *Frontend) handle(ctx context.Context, u update, receive func(context.Co
 		}
 	}
 	e := core.Envelope{Source: source}
+	if m.Date > 0 {
+		e.Time = time.Unix(m.Date, 0)
+	}
 	if m.Text != "" {
 		e.Parts = append(e.Parts, core.Part{Type: core.PartText, Text: m.Text})
 	}

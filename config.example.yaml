@@ -1,5 +1,11 @@
 debug: false
 
+# Prefix frontend messages in the router (Go time layout; includes separator).
+timestamp:
+  enabled: true
+  timezone: "UTC" # e.g. Europe/London or Asia/Shanghai
+  format: "[2006-01-02 15:04:05 MST] "
+
 frontends:
   telegram:
     type: telegram
@@ -19,7 +25,7 @@ telegram:
 
 stream:
   separators: ["\n", "<break />"]
-  show_tool_calls: false
+  show_tool_calls: true
 
 media:
   dir: /data/media

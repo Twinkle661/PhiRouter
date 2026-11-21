@@ -12,7 +12,14 @@ import (
 )
 
 type Route struct{ From, To string }
+type TimestampOptions struct {
+	Enabled  bool
+	Location *time.Location
+	Format   string
+}
+
 type Options struct {
+	Timestamp     TimestampOptions
 	Routes        []Route
 	DefaultSource string
 	Separators    []string
@@ -187,8 +194,40 @@ func (r *Router) accept(ctx context.Context, e core.Envelope) error {
 			return err
 		}
 	}
+	if e.Channel && r.opt.Timestamp.Enabled && !slashCommand(e) {
+		sent := e.Time
+		if sent.IsZero() {
+			sent = time.Now()
+		}
+		e = r.timestamp(e, sent)
+	}
 	return r.dispatch(ctx, s, e)
 }
+
+// slashCommand reports whether e is a slash command the router did not handle
+// itself (e.g. a pi skill or prompt template). These are forwarded unprefixed
+// so the backend still recognises them.
+func slashCommand(e core.Envelope) bool {
+	return len(e.Parts) > 0 && e.Parts[0].Type == core.PartText && strings.HasPrefix(strings.TrimSpace(e.Parts[0].Text), "/")
+}
+
+// timestamp runs once on acceptance, before queueing; retries reuse this prefix.
+// sent is the frontend-reported send time, falling back to acceptance time.
+func (r *Router) timestamp(e core.Envelope, sent time.Time) core.Envelope {
+	e = clone(e)
+	loc := r.opt.Timestamp.Location
+	if loc == nil {
+		loc = time.UTC
+	}
+	prefix := sent.In(loc).Format(r.opt.Timestamp.Format)
+	if len(e.Parts) > 0 && e.Parts[0].Type == core.PartText {
+		e.Parts[0].Text = prefix + e.Parts[0].Text
+	} else {
+		e.Parts = append([]core.Part{{Type: core.PartText, Text: prefix}}, e.Parts...)
+	}
+	return e
+}
+
 func (r *Router) dispatch(ctx context.Context, s *state, e core.Envelope) error {
 	original := clone(e)
 	if !s.ready {
