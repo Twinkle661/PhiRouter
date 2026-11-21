@@ -83,26 +83,26 @@ func TestSupervisionRestoresSessionAndLargeJSONL(t *testing.T) {
 			t.Error("backend did not stop")
 		}
 	}()
-	wait := func(kind string) core.Event {
+	wait := func(kind core.EventKind) core.Event {
 		t.Helper()
 		for {
 			select {
 			case e := <-events:
-				if e.Type == kind {
+				if e.Kind == kind {
 					return e
 				}
 			case <-time.After(5 * time.Second):
-				t.Fatalf("missing %s event", kind)
+				t.Fatalf("missing event kind %d", kind)
 			}
 		}
 	}
-	wait("ready")
+	wait(core.EventReady)
 	callCtx, c := context.WithTimeout(ctx, 2*time.Second)
 	defer c()
-	if _, err = b.Submit(callCtx, core.Envelope{Channel: true, Parts: []core.Part{{Type: core.PartText, Text: "hello"}}}, core.DeliveryStart); err != nil {
+	if _, err = b.Prompt(callCtx, core.Envelope{Channel: true, Parts: []core.Part{{Type: core.PartText, Text: "hello"}}}, core.DeliveryPrompt); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = b.Submit(callCtx, core.Envelope{Parts: []core.Part{{Type: core.PartText, Text: "queued plugin"}}}, core.DeliveryQueue); err != nil {
+	if _, err = b.Prompt(callCtx, core.Envelope{Parts: []core.Part{{Type: core.PartText, Text: "queued plugin"}}}, core.DeliveryFollowUp); err != nil {
 		t.Fatal(err)
 	}
 	models, err := b.Models(callCtx)
@@ -112,21 +112,21 @@ func TestSupervisionRestoresSessionAndLargeJSONL(t *testing.T) {
 	if err = b.SetModel(callCtx, models[0]); err != nil {
 		t.Fatal(err)
 	}
-	if err = b.Respond(callCtx, core.Reply{ID: "dialog-1", Confirmed: true}); err != nil {
+	if err = b.Respond(callCtx, core.Reply{ID: "dialog-1", OptionID: "pick"}); err != nil {
 		t.Fatal(err)
 	}
-	if err = b.Abort(callCtx); err != nil {
+	if err = b.Cancel(callCtx); err != nil {
 		t.Fatal(err)
 	}
-	e := wait("message_update")
+	e := wait(core.EventMessageChunk)
 	if len(e.Text) != 100007 {
 		t.Fatalf("truncated delta: %d", len(e.Text))
 	}
 	if err = b.Restart(ctx); err != nil {
 		t.Fatal(err)
 	}
-	wait("restarting")
-	wait("ready")
+	wait(core.EventRestarting)
+	wait(core.EventReady)
 	raw, err := os.ReadFile(log)
 	if err != nil {
 		t.Fatal(err)
@@ -141,7 +141,7 @@ func TestSupervisionRestoresSessionAndLargeJSONL(t *testing.T) {
 	if clearAt < 0 || abortAt < clearAt {
 		t.Fatalf("abort did not clear queue first: %s", raw)
 	}
-	if !strings.Contains(string(raw), `"modelId":"expected"`) || !strings.Contains(string(raw), `"id":"dialog-1"`) {
+	if !strings.Contains(string(raw), `"modelId":"expected"`) || !strings.Contains(string(raw), `"id":"dialog-1"`) || !strings.Contains(string(raw), `"value":"pick"`) {
 		t.Fatalf("typed command mapping failed: %s", raw)
 	}
 	saved, _ := os.ReadFile(filepath.Join(dir, "session"))
@@ -178,7 +178,7 @@ func TestCommandTimeoutDoesNotKillProcess(t *testing.T) {
 	}()
 	select {
 	case e := <-events:
-		if e.Type != "ready" {
+		if e.Kind != core.EventReady {
 			t.Fatal(e)
 		}
 	case <-time.After(3 * time.Second):
@@ -284,7 +284,7 @@ func TestToolEventsAreNormalizedWithoutResults(t *testing.T) {
 	for _, line := range []string{`{"type":"tool_execution_start","toolName":"bash","args":{"command":"secret"}}`, `{"type":"tool_execution_update","toolName":"bash","partialResult":"large secret output"}`, `{"type":"tool_execution_end","toolName":"bash","isError":true,"durationMs":1234,"result":"secret"}`} {
 		b.record([]byte(line), func(e core.Event) { events = append(events, e) })
 	}
-	if events[0].Tool == nil || events[0].Tool.Phase != core.ToolStarted || events[0].Tool.Detail != "secret" || events[1].Tool != nil || events[2].Tool == nil || !events[2].Tool.Failed || events[2].Tool.Detail != "" || events[2].Tool.Duration != 1234*time.Millisecond {
+	if events[0].Tool == nil || events[0].Tool.Status != core.ToolInProgress || events[0].Tool.Detail != "secret" || events[1].Tool != nil || events[1].Kind != core.EventExtension || events[2].Tool == nil || events[2].Tool.Status != core.ToolFailed || events[2].Tool.Detail != "" || events[2].Tool.Duration != 1234*time.Millisecond {
 		t.Fatalf("bad tool events: %+v", events)
 	}
 }
@@ -302,5 +302,109 @@ func TestToolDetail(t *testing.T) {
 		if got := toolDetail(json.RawMessage(args)); got != want {
 			t.Errorf("toolDetail(%s) = %q, want %q", args, got, want)
 		}
+	}
+}
+
+func TestDialogsTranslateAndAnswerInKind(t *testing.T) {
+	b := New(Options{})
+	var events []core.Event
+	for _, line := range []string{
+		`{"type":"extension_ui_request","id":"c","method":"confirm","title":"Proceed?"}`,
+		`{"type":"extension_ui_request","id":"s","method":"select","title":"Pick","options":["a","b"]}`,
+		`{"type":"extension_ui_request","id":"e","method":"editor","title":"Edit","prefill":"x","timeout":1500}`,
+		`{"type":"extension_ui_request","id":"n","method":"notify","message":"heads up"}`,
+		`{"type":"extension_ui_request","id":"w","method":"setWidget"}`,
+	} {
+		b.record([]byte(line), func(e core.Event) { events = append(events, e) })
+	}
+	confirm, sel, edit := events[0].Dialog, events[1].Dialog, events[2].Dialog
+	if confirm == nil || len(confirm.Options) != 2 || !confirm.Options[1].Kind.Rejects() {
+		t.Fatalf("confirm: %+v", events[0])
+	}
+	if sel == nil || sel.Kind != core.DialogSelect || sel.Options[1].ID != "b" || sel.Options[1].Label != "b" {
+		t.Fatalf("select: %+v", events[1])
+	}
+	if edit == nil || edit.Kind != core.DialogInput || !edit.Multiline || edit.Timeout != 1500*time.Millisecond {
+		t.Fatalf("editor: %+v", events[2])
+	}
+	if events[3].Kind != core.EventNotice || events[3].Text != "heads up" || events[4].Kind != core.EventExtension || len(events[4].Raw) == 0 {
+		t.Fatalf("notify/other: %+v %+v", events[3], events[4])
+	}
+	// Answers are written in the shape each pi method expects.
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	b.stdin = writer
+	b.exited = make(chan struct{})
+	b.writes = make(chan writeRequest)
+	writerDone := make(chan struct{})
+	go func() { defer close(writerDone); writeLoop(writer, b.writes, b.exited) }()
+	defer func() { _ = writer.Close(); close(b.exited); <-writerDone }()
+	got := make(chan map[string]any, 3)
+	go func() {
+		br := bufio.NewReader(reader)
+		for i := 0; i < 3; i++ {
+			line, err := br.ReadBytes('\n')
+			if err != nil {
+				return
+			}
+			var m map[string]any
+			_ = json.Unmarshal(line, &m)
+			got <- m
+		}
+	}()
+	ctx := context.Background()
+	for _, r := range []core.Reply{{ID: "c", OptionID: "yes"}, {ID: "s", OptionID: "b"}, {ID: "e", Text: "edited"}} {
+		if err := b.Respond(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c, s, e := <-got, <-got, <-got
+	if c["confirmed"] != true || s["value"] != "b" || e["value"] != "edited" {
+		t.Fatalf("answers: %v %v %v", c, s, e)
+	}
+}
+
+func TestMCPRegistrationPreservesEntries(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mcp.json")
+	_ = os.WriteFile(path, []byte(`{"mcpServers":{"existing":{"command":"example"}},"custom":true}`), 0600)
+	if err := RegisterMCP(path, "http://127.0.0.1:8081/mcp"); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(path)
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	servers := cfg["mcpServers"].(map[string]any)
+	if servers["existing"] == nil || servers["phirouter"] == nil || cfg["custom"] != true {
+		t.Fatal(string(raw))
+	}
+	if !strings.Contains(string(raw), "${ROUTER_MCP__TOKEN}") || !strings.Contains(string(raw), core.RouteHeader) {
+		t.Fatal("missing secret or route reference")
+	}
+	_ = os.WriteFile(path, []byte(`null`), 0600)
+	if err := RegisterMCP(path, "endpoint"); err == nil {
+		t.Fatal("null config accepted")
+	}
+}
+
+func TestFromConfigUsesAgentDir(t *testing.T) {
+	dir, state := t.TempDir(), t.TempDir()
+	c := DefaultConfig()
+	c.AgentDir = dir
+	b, err := FromConfig(c, state, core.ToolServer{URL: "http://127.0.0.1:8081/mcp", Token: "secret", Route: "zero"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.opt.StatePath != filepath.Join(state, "session") || b.opt.InlineMax != 5*1024*1024 {
+		t.Fatalf("options: %+v", b.opt)
+	}
+	env := strings.Join(b.opt.Env, " ")
+	if !strings.Contains(env, "PI_CODING_AGENT_DIR="+dir) || !strings.Contains(env, "PHIROUTER_BACKEND=zero") {
+		t.Fatal(env)
+	}
+	raw, _ := os.ReadFile(filepath.Join(dir, "mcp.json"))
+	if strings.Contains(string(raw), "secret") {
+		t.Fatal("token written to disk")
 	}
 }

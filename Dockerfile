@@ -12,16 +12,15 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && npm install -g --ignore-scripts @earendil-works/pi-coding-agent@${PI_VERSION} \
     && npm cache clean --force \
-    && mkdir -p /home/node/.pi/agent /data/media/in /data/media/out /app \
+    && mkdir -p /home/node/.pi/agent /data/media/in /data/media/out /app/router \
     && chown -R node:node /home/node/.pi /data/media /app
 COPY --from=build /router /usr/local/bin/router
-COPY config.example.yaml /app/config.yaml
+COPY --chown=node:node config.example.yaml /app/router/config.yaml
 ENV HOME=/home/node
 USER node
-WORKDIR /app
-VOLUME ["/home/node/.pi/agent", "/data/media"]
+WORKDIR /app/router
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD ["router", "-healthcheck", "http://127.0.0.1:8080/healthz"]
 ENTRYPOINT ["router"]
-CMD ["-config", "/app/config.yaml"]
+CMD ["-config", "/app/router/config.yaml"]

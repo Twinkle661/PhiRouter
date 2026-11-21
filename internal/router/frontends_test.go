@@ -59,16 +59,16 @@ func (h *eventHook) OnEvent(_ context.Context, _ string, e core.Event) error {
 func TestSendNotAllowedIsReportedToHooks(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	f, h := &fakeFrontend{refuse: true}, &eventHook{}
-	r := New(Options{Routes: fakeRoutes, Owners: fakeOwners, Hooks: []core.Hook{h}}, map[string]core.Frontend{"fake": f}, map[string]core.Backend{"test:default": &fakeBackend{}})
+	r := New(Options{Routes: fakeRoutes, Owners: fakeOwners, Hooks: []core.Hook{h}}, map[string]core.Frontend{"fake": f}, map[string]core.Backend{"default": &fakeBackend{}})
 	go r.Run(ctx)
 	t.Cleanup(func() { cancel(); <-r.done })
-	err := r.Send(ctx, core.Envelope{Route: "test:default", Parts: []core.Part{{Type: core.PartFile, Path: "/data/media/out/x"}}})
+	err := r.Send(ctx, core.Envelope{Route: "default", Parts: []core.Part{{Type: core.PartFile, Path: "/data/media/out/x"}}})
 	if !errors.Is(err, core.ErrSendNotAllowed) {
 		t.Fatalf("refusal not surfaced to the caller: %v", err)
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if len(h.events) != 1 || h.events[0].Type != "send_not_allowed" || !strings.Contains(h.events[0].Text, "window closed") {
+	if len(h.events) != 1 || h.events[0].Kind != core.EventDeliveryRefused || !strings.Contains(h.events[0].Text, "window closed") {
 		t.Fatalf("hooks not notified: %+v", h.events)
 	}
 }

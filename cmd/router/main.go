@@ -2,10 +2,8 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
-	"github.com/Twinkle661/PhiRouter/adapters/backend/pi"
 	"github.com/Twinkle661/PhiRouter/internal/api"
 	"github.com/Twinkle661/PhiRouter/internal/config"
 	"github.com/Twinkle661/PhiRouter/internal/core"
@@ -19,8 +17,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -50,7 +46,7 @@ func run() error {
 		}
 		return nil
 	}
-	c, err := config.Load(*path, *dotenv, frontendRegistry(), providerRegistry())
+	c, err := config.Load(*path, *dotenv, registries())
 	if err != nil {
 		return err
 	}
@@ -64,23 +60,8 @@ func run() error {
 		return err
 	}
 	defer store.Close()
-	home, err := os.UserHomeDir()
+	backends, policies, err := buildBackends(c, store)
 	if err != nil {
-		return err
-	}
-	agentDir := filepath.Join(home, ".pi", "agent")
-	if err = os.MkdirAll(agentDir, 0700); err != nil {
-		return err
-	}
-	backends := map[string]core.Backend{}
-	for name, b := range c.Backends {
-		if strings.ContainsAny(name, "/\\.") {
-			return fmt.Errorf("backend name must not contain path separators or dots")
-		}
-		route := b.Type + ":" + name
-		backends[route] = pi.New(pi.Options{Command: b.Command, Env: []string{"ROUTER_MCP__TOKEN=" + c.MCP.Token, "PHIROUTER_BACKEND=" + route}, StatePath: filepath.Join(agentDir, "phirouter-"+name+".session"), SessionFile: b.SessionFile, Attachment: c.Prompts.Attachment, InlineMax: c.Media.InlineImageMaxMB * 1024 * 1024, Media: store})
-	}
-	if err = registerMCP(filepath.Join(agentDir, "mcp.json"), "http://"+c.MCP.Listen+"/mcp"); err != nil {
 		return err
 	}
 	frontends, owners, webhooks, err := buildFrontends(c, store)
@@ -98,7 +79,7 @@ func run() error {
 		routes = append(routes, router.Route{From: r.From, To: r.To})
 	}
 	timestamp := router.TimestampOptions{Enabled: c.Timestamp.Enabled, Location: c.Timestamp.Location, Format: c.Timestamp.Format}
-	rt := router.New(router.Options{Timestamp: timestamp, Routes: routes, Owners: owners, Separators: c.Stream.Separators, ShowTools: c.Stream.ShowToolCalls.Enabled, ToolDetail: c.Stream.ShowToolCalls.Detailed, ToolDetailLimit: c.Stream.ShowToolCalls.MaxDetailLength, QueueLimit: c.QueueLimit, Hooks: hooks}, frontends, backends)
+	rt := router.New(router.Options{Timestamp: timestamp, Routes: routes, Owners: owners, Separators: c.Stream.Separators, ShowTools: c.Stream.ShowToolCalls.Enabled, ToolDetail: c.Stream.ShowToolCalls.Detailed, ToolDetailLimit: c.Stream.ShowToolCalls.MaxDetailLength, QueueLimit: c.QueueLimit, BusyPolicy: policies, Hooks: hooks}, frontends, backends)
 	apiListener, err := net.Listen("tcp", c.API.Listen)
 	if err != nil {
 		return err
@@ -220,39 +201,6 @@ func run() error {
 	wg.Wait()
 	return err
 }
-func registerMCP(path, endpoint string) error {
-	config := map[string]any{}
-	raw, err := os.ReadFile(path)
-	if err == nil {
-		if err = json.Unmarshal(raw, &config); err != nil {
-			return fmt.Errorf("invalid existing mcp.json: %w", err)
-		}
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-	if config == nil {
-		return fmt.Errorf("mcp.json must contain an object")
-	}
-	servers, ok := config["mcpServers"].(map[string]any)
-	if !ok && config["mcpServers"] != nil {
-		return fmt.Errorf("mcpServers must be an object")
-	}
-	if servers == nil {
-		servers = map[string]any{}
-	}
-	servers["phirouter"] = map[string]any{"type": "http", "url": endpoint, "headers": map[string]string{"Authorization": "Bearer ${ROUTER_MCP__TOKEN}", "X-PhiRouter-Route": "${PHIROUTER_BACKEND}"}}
-	config["mcpServers"] = servers
-	raw, err = json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmp := path + ".phirouter.tmp"
-	if err = os.WriteFile(tmp, append(raw, '\n'), 0600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
-}
-
 func notifyLifecycle(f core.Frontend, address, text string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

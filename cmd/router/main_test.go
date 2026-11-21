@@ -2,43 +2,19 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"github.com/Twinkle661/PhiRouter/adapters/frontend/telegram"
 	"github.com/Twinkle661/PhiRouter/adapters/tts/openaispeech"
 	"github.com/Twinkle661/PhiRouter/internal/config"
 	"github.com/Twinkle661/PhiRouter/internal/core"
 	"github.com/Twinkle661/PhiRouter/internal/media"
+	"github.com/Twinkle661/PhiRouter/internal/router"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
-
-func TestMCPRegistrationPreservesEntries(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "mcp.json")
-	_ = os.WriteFile(path, []byte(`{"mcpServers":{"existing":{"command":"example"}},"custom":true}`), 0600)
-	if err := registerMCP(path, "http://127.0.0.1:8081/mcp"); err != nil {
-		t.Fatal(err)
-	}
-	raw, _ := os.ReadFile(path)
-	var cfg map[string]any
-	if err := json.Unmarshal(raw, &cfg); err != nil {
-		t.Fatal(err)
-	}
-	servers := cfg["mcpServers"].(map[string]any)
-	if servers["existing"] == nil || servers["phirouter"] == nil || cfg["custom"] != true {
-		t.Fatal(string(raw))
-	}
-	if !strings.Contains(string(raw), "${ROUTER_MCP__TOKEN}") {
-		t.Fatal("missing secret reference")
-	}
-	_ = os.WriteFile(path, []byte(`null`), 0600)
-	if err := registerMCP(path, "endpoint"); err == nil {
-		t.Fatal("null config accepted")
-	}
-}
 
 type noticeFrontend struct {
 	core.Frontend
@@ -84,12 +60,12 @@ func TestBuildFrontendsRejectsUnsupportedIngress(t *testing.T) {
 func TestSendVoiceWiring(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
-	body := "frontends:\n  tg:\n    type: telegram\n    owner: \"1\"\n    options:\n      token: t\nroutes:\n  - from: \"tg:*\"\n    to: pi:default\napi:\n  token: a\nmcp:\n  token: b\n  tools:\n    send_voice:\n      enabled: true\n      provider:\n        options:\n          model: openai/gpt-4o-mini-tts-2025-12-15\n          voice: nova\n"
+	body := "frontends:\n  tg:\n    type: telegram\n    owner: \"1\"\n    options:\n      token: t\nroutes:\n  - from: \"tg:*\"\n    to: default\napi:\n  token: a\nmcp:\n  token: b\n  tools:\n    send_voice:\n      enabled: true\n      provider:\n        options:\n          model: openai/gpt-4o-mini-tts-2025-12-15\n          voice: nova\n"
 	if err := os.WriteFile(path, []byte(body), 0600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("ROUTER_MCP__TOOLS__SEND_VOICE__PROVIDER__OPTIONS__API_KEY", "key")
-	c, err := config.Load(path, filepath.Join(dir, ".env"), frontendRegistry(), providerRegistry())
+	c, err := config.Load(path, filepath.Join(dir, ".env"), registries())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,5 +85,45 @@ func TestSendVoiceWiring(t *testing.T) {
 	c.MCP.Tools.SendVoice.Enabled = false
 	if tools, _ = buildTools(c, store, nil); len(tools) != 1 {
 		t.Fatal(tools)
+	}
+}
+
+func TestBuildBackendsFromConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	body := "frontends:\n  tg:\n    type: telegram\n    owner: \"1\"\n    options:\n      token: t\nroutes:\n  - from: \"tg:*\"\n    to: zero\n  - from: \"tg:2\"\n    to: coder\napi:\n  token: a\nmcp:\n  token: b\nstate:\n  dir: " + filepath.Join(dir, "state") + "\nbackends:\n  zero:\n    type: pi\n    options:\n      agent_dir: " + filepath.Join(dir, "pi") + "\n  coder:\n    type: acp\n    busy_policy: interrupt\n    options:\n      command: [opencode, acp]\n      cwd: /work\n"
+	if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := config.Load(path, filepath.Join(dir, ".env"), registries())
+	if err != nil {
+		t.Fatal(err)
+	}
+	backends, policies, err := buildBackends(c, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(backends) != 2 || backends["zero"].Capabilities() == backends["coder"].Capabilities() {
+		t.Fatalf("backends: %+v", backends)
+	}
+	if policies["coder"] != router.BusyInterrupt || policies["zero"] != router.BusyQueue {
+		t.Fatalf("policies: %+v", policies)
+	}
+	if _, err = os.Stat(filepath.Join(dir, "pi", "mcp.json")); err != nil {
+		t.Fatal("pi tool server not registered:", err)
+	}
+}
+
+func TestExampleConfigLoads(t *testing.T) {
+	t.Setenv("ROUTER_FRONTENDS__TG__OPTIONS__TOKEN", "1:t")
+	t.Setenv("ROUTER_FRONTENDS__TG__OWNER", "1")
+	t.Setenv("ROUTER_API__TOKEN", "a")
+	t.Setenv("ROUTER_MCP__TOKEN", "b")
+	c, err := config.Load(filepath.Join("..", "..", "config.example.yaml"), filepath.Join(t.TempDir(), ".env"), registries())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b := c.Backends["default"]; b.Type != "pi" || len(c.Backends) != 1 || c.Routes[0].To != "default" {
+		t.Fatalf("%+v", c.Backends)
 	}
 }

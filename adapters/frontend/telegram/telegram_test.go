@@ -68,7 +68,7 @@ func TestAuthorizationDialogsAndMedia(t *testing.T) {
 	if len(received) != 0 || len(calls) != 0 {
 		t.Fatal("unauthorized update touched network")
 	}
-	if err = f.Dialog(ctx, "42", core.Dialog{ID: "request1", Method: "select", Title: "Choose", Options: []string{strings.Repeat("long", 100)}}); err != nil {
+	if err = f.Dialog(ctx, "42", core.Dialog{ID: "request1", Title: "Choose", Options: []core.Option{{ID: "o1", Label: strings.Repeat("long", 100)}}}); err != nil {
 		t.Fatal(err)
 	}
 	if len(token) > 64 {
@@ -78,7 +78,7 @@ func TestAuthorizationDialogsAndMedia(t *testing.T) {
 	if err = f.handle(ctx, decode(callback), receive); err != nil {
 		t.Fatal(err)
 	}
-	if len(received) != 1 || received[0].Reply == nil || received[0].Reply.ID != "request1" {
+	if len(received) != 1 || received[0].Reply == nil || received[0].Reply.ID != "request1" || received[0].Reply.OptionID != "o1" {
 		t.Fatal(received)
 	}
 	_ = f.handle(ctx, decode(callback), receive)
@@ -109,7 +109,7 @@ func TestForceReplyIsNotPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Reply == nil || got.Reply.Value != "answer" || len(got.Parts) != 0 {
+	if got.Reply == nil || got.Reply.Text != "answer" || len(got.Parts) != 0 {
 		t.Fatal(got)
 	}
 }
@@ -184,7 +184,7 @@ func TestSystemNoticesAndAgentText(t *testing.T) {
 	if restored != body {
 		t.Fatal("notice text lost during chunking")
 	}
-	if err := f.Dialog(ctx, "42", core.Dialog{Title: "Choose a model", Method: "select", Options: []string{"provider/model"}}); err != nil {
+	if err := f.Dialog(ctx, "42", core.Dialog{Title: "Choose a model", Options: []core.Option{{ID: "provider/model", Label: "provider/model"}}}); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.HasPrefix(texts[len(texts)-1], header) {
@@ -288,5 +288,36 @@ func TestConfigAndAddresses(t *testing.T) {
 		if (ValidAddress(addr) == nil) != ok {
 			t.Errorf("address %q: want valid=%v", addr, ok)
 		}
+	}
+}
+
+func TestRejectingOptionsReplaceCancel(t *testing.T) {
+	var keyboards [][]string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Markup struct {
+				Keyboard [][]struct{ Text string } `json:"inline_keyboard"`
+			} `json:"reply_markup"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		var labels []string
+		for _, row := range body.Markup.Keyboard {
+			labels = append(labels, row[0].Text)
+		}
+		keyboards = append(keyboards, labels)
+		_, _ = fmt.Fprint(w, `{"ok":true,"result":{"message_id":1}}`)
+	}))
+	defer server.Close()
+	f := New(Options{Token: "test", UserID: 42, BaseURL: server.URL})
+	ctx := context.Background()
+	permission := core.Dialog{ID: "p", Title: "Run?", Options: []core.Option{{ID: "a", Label: "Allow once", Kind: core.OptionAllowOnce}, {ID: "r", Label: "Reject", Kind: core.OptionRejectOnce}}}
+	plain := core.Dialog{ID: "s", Title: "Pick", Options: []core.Option{{ID: "x", Label: "X"}}}
+	for _, d := range []core.Dialog{permission, plain} {
+		if err := f.Dialog(ctx, "42", d); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := fmt.Sprint(keyboards); got != "[[Allow once Reject] [X Cancel]]" {
+		t.Fatal(got)
 	}
 }

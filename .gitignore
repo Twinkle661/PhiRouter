@@ -5,3 +5,8 @@ config.yaml
 bin/
 coverage.out
 *.log
+
+# Deployment data (see compose.yaml)
+/router/
+/pi/
+/codex/

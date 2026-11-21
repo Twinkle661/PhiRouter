@@ -22,15 +22,35 @@ frontends:
 # Frontends whose owner receives startup/shutdown notices.
 lifecycle_notify: [tg]
 
+# Backend instances. Without this section one pi instance named "default"
+# runs; declaring any backend replaces it.
 backends:
   default:
     type: pi
-    command: ["pi", "--mode", "rpc"]
-    # session_file: /home/node/.pi/agent/sessions/example.jsonl
+    # busy_policy: queue      # only matters for backends that cannot steer
+    options:
+      command: ["pi", "--mode", "rpc"]
+      # session_file: /home/node/.pi/agent/sessions/example.jsonl
+      # agent_dir: /home/node/.pi/agent
+      attachment: "[attachment: {path} ({mime}, {size})]"
+      inline_image_max_mb: 5
+  # Any Agent Client Protocol agent, e.g. OpenCode:
+  # coder:
+  #   type: acp
+  #   busy_policy: queue      # queue | interrupt: a user message while busy
+  #   options:
+  #     command: ["opencode", "acp"]
+  #     cwd: /workspace       # absolute
+  #     env: {}
+  #     permission: ask       # ask | allow | reject
+  #     inline_image_max_mb: 5
 
+# Destinations are backend instance names.
 routes:
   - from: "tg:*"
-    to: "pi:default"
+    to: "default"
+  # - from: "tg:-1001234567890"
+  #   to: "coder"
 
 stream:
   separators: ["\n", "<break />"]
@@ -41,8 +61,12 @@ stream:
 
 media:
   dir: /data/media
-  inline_image_max_mb: 5
   ttl: 24h
+
+# Per-backend state, in <dir>/<backend name> (pi's session pointer, an ACP
+# session ID). Relative to this file's directory.
+state:
+  dir: state
 
 api:
   listen: "127.0.0.1:8080"
@@ -79,9 +103,6 @@ mcp:
 # ingress:
 #   listen: "0.0.0.0:8443"
 
-prompts:
-  attachment: "[attachment: {path} ({mime}, {size})]"
-
 queue_limit: 256
 plugins: []
 # plugins:
@@ -89,5 +110,5 @@ plugins: []
 #     prefix: "Reply briefly."
 #   - type: ticker
 #     interval: 24h
-#     route: pi:default
+#     route: default
 #     text: "Check whether the user needs a daily reminder."
