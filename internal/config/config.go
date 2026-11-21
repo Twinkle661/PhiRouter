@@ -12,13 +12,21 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	_ "time/tzdata" // Keep IANA timezones available in minimal containers.
 )
 
 type Endpoint struct {
 	Listen string `yaml:"listen"`
 	Token  string `yaml:"token"`
 }
+type Timestamp struct {
+	Enabled  bool   `yaml:"enabled"`
+	Timezone string `yaml:"timezone"`
+	Format   string `yaml:"format"`
+}
+
 type Config struct {
+	Timestamp Timestamp           `yaml:"timestamp"`
 	Debug     bool                `yaml:"debug"`
 	Frontends map[string]Frontend `yaml:"frontends"`
 	Backends  map[string]Backend  `yaml:"backends"`
@@ -68,6 +76,8 @@ type Plugin struct {
 
 func Defaults() Config {
 	var c Config
+	c.Timestamp.Timezone = "UTC"
+	c.Timestamp.Format = "[2006-01-02 15:04:05 MST] "
 	c.Frontends = map[string]Frontend{"telegram": {Type: "telegram"}}
 	c.Backends = map[string]Backend{"default": {Type: "pi", Command: []string{"pi", "--mode", "rpc"}}}
 	c.Routes = []Route{{"telegram:*", "pi:default"}}
@@ -209,6 +219,14 @@ func set(v reflect.Value, path []string, raw string) error {
 	return fmt.Errorf("unknown configuration field %s", strings.Join(path, "."))
 }
 func (c Config) Validate() error {
+	if c.Timestamp.Enabled {
+		if strings.TrimSpace(c.Timestamp.Timezone) == "" || strings.TrimSpace(c.Timestamp.Format) == "" {
+			return fmt.Errorf("timestamp.timezone and timestamp.format must not be empty when enabled")
+		}
+		if _, err := time.LoadLocation(c.Timestamp.Timezone); err != nil {
+			return fmt.Errorf("invalid timestamp.timezone: %w", err)
+		}
+	}
 	if c.Telegram.Token == "" || c.Telegram.UserID <= 0 {
 		return fmt.Errorf("telegram.token and positive telegram.user_id are required")
 	}

@@ -65,6 +65,17 @@ export ROUTER_ROUTES__0__FROM='telegram:123456789'
 
 Structured environment overrides are applied before more specific child overrides. Map keys used in individual environment paths are lowercase. YAML maps merge with default map entries; use a whole-map environment value to replace a map completely. Missing `config.yaml` and `.env` are allowed when environment variables provide all required settings.
 
+Enable `timestamp.enabled` to prefix frontend messages inside the router. `timestamp.timezone` defaults to `UTC` and accepts IANA names such as `Europe/London` (including daylight saving changes). `timestamp.format` uses Go's reference time layout, defaulting to `"[2006-01-02 15:04:05 MST] "`; include any brackets, spaces, or newlines in the format itself. For example:
+
+```yaml
+timestamp:
+  enabled: true
+  timezone: Europe/London
+  format: "[2006-01-02 15:04:05 MST] "
+```
+
+This produces messages such as `[2026-11-21 14:30:00 GMT] Hello`. Environment overrides are `ROUTER_TIMESTAMP__ENABLED`, `ROUTER_TIMESTAMP__TIMEZONE`, and `ROUTER_TIMESTAMP__FORMAT`. The timestamp records router acceptance time, before queueing and inbound hooks; reconnects and `/retry` preserve it without adding another prefix. Media-only messages receive a leading text part. Router commands and dialog replies retain their normal behavior; API/plugin injections and outbound messages are not timestamped. The feature is disabled by default. Invalid timezones and empty formats fail startup when enabled.
+
 The default restart queue holds 256 envelopes per backend and rejects overflow explicitly. It is memory-only. TTL cleanup runs on startup and every minute, recursively under `in/` and `out/`. Image thresholds and Telegram download limits use binary MB (MiB); attachment text sizes use decimal MB. No STT, TTS, document parsing, webhook, or outbound plugin subscription is performed.
 
 Multiple pi backend instances can be declared and routed independently; add distinct source routes and backend names. A backend maintains one conversation/session. Exact routes take precedence over wildcards. Proactive traffic returns to that backend's last authorized source, or its configured exact route; a wildcard without prior inbound traffic defaults to the bound user's private chat. Avoid overlapping routes to the same source when expecting separate conversations. Additional frontend/backend adapter types require registration in `cmd/router` and config validation, with no changes to `core`.
