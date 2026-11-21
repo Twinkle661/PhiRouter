@@ -22,6 +22,7 @@ routes:
 
 telegram:
   system_prefix: "𝑴𝒆𝒐𝒘☕︎" # Set to "" to keep only the System label.
+  system_style: auto # full | compact | auto (one-line header for single-line notices)
 
 stream:
   separators: ["\n", "<break />"]

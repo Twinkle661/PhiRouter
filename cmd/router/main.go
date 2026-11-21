@@ -84,7 +84,7 @@ func run() error {
 	if err = registerMCP(filepath.Join(agentDir, "mcp.json"), "http://"+c.MCP.Listen+"/mcp"); err != nil {
 		return err
 	}
-	tg := telegram.New(telegram.Options{SystemPrefix: c.Telegram.SystemPrefix, Token: c.Telegram.Token, UserID: c.Telegram.UserID, Media: store, VoiceMaxSeconds: c.Media.VoiceMaxSeconds})
+	tg := telegram.New(telegram.Options{SystemPrefix: c.Telegram.SystemPrefix, SystemStyle: c.Telegram.SystemStyle, Token: c.Telegram.Token, UserID: c.Telegram.UserID, Media: store, VoiceMaxSeconds: c.Media.VoiceMaxSeconds})
 	var hooks []core.Hook
 	for _, p := range c.Plugins {
 		if p.Type == "prefix" {

@@ -27,6 +27,7 @@ const downloadLimit int64 = 20 * 1024 * 1024
 
 type Options struct {
 	SystemPrefix    string
+	SystemStyle     string
 	Token           string
 	UserID          int64
 	Media           core.MediaStore
@@ -46,6 +47,7 @@ type answer struct {
 	chat    int64
 	message int64
 	title   string
+	compact bool
 	expires time.Time
 }
 type user struct {
@@ -312,7 +314,8 @@ func (f *Frontend) Send(ctx context.Context, chat string, e core.Envelope) error
 		if p.Type == core.PartText {
 			limit := 4096
 			if e.System {
-				limit -= len([]rune(f.systemText(""))) * 2
+				// Reserve the full header, which is never shorter than the compact one.
+				limit -= len([]rune(f.decorate("", false))) * 2
 			}
 			for _, text := range chunks(p.Text, limit) {
 				if strings.TrimSpace(text) == "" {
@@ -450,7 +453,8 @@ func (f *Frontend) Dialog(ctx context.Context, chat string, d core.Dialog) error
 	if text == "" {
 		text = "Please reply."
 	}
-	text = chunks(f.systemText(text), 4096)[0]
+	compact := f.compact(text)
+	text = chunks(f.decorate(text, compact), 4096)[0]
 	body := map[string]any{"chat_id": chat, "text": text}
 	expiry := time.Time{}
 	if d.TimeoutMS > 0 {
@@ -474,7 +478,7 @@ func (f *Frontend) Dialog(ctx context.Context, chat string, d core.Dialog) error
 			}
 			token := hex.EncodeToString(buf)
 			reply := core.Reply{ID: d.ID, Value: label, Confirmed: label == "Yes", Cancelled: d.Method != "confirm" && i == len(options)-1}
-			entries[token] = answer{reply: reply, chat: cid, title: d.Title, expires: expiry}
+			entries[token] = answer{reply: reply, chat: cid, title: d.Title, compact: compact, expires: expiry}
 			rows = append(rows, []map[string]string{{"text": label, "callback_data": token}})
 		}
 		// Telegram limits keyboards to 100 buttons; split large model menus into pages of messages.
@@ -512,7 +516,7 @@ func (f *Frontend) Dialog(ctx context.Context, chat string, d core.Dialog) error
 		f.buttons[k] = a
 	}
 	if len(entries) == 0 {
-		f.replies[sent.ID] = answer{reply: core.Reply{ID: d.ID}, chat: cid, message: sent.ID, title: d.Title, expires: expiry}
+		f.replies[sent.ID] = answer{reply: core.Reply{ID: d.ID}, chat: cid, message: sent.ID, title: d.Title, compact: compact, expires: expiry}
 	}
 	return nil
 }
@@ -536,7 +540,15 @@ func (f *Frontend) selected(ctx context.Context, a answer) error {
 	if a.reply.Cancelled {
 		value = "Cancelled"
 	}
-	return f.api(ctx, "editMessageText", map[string]any{"chat_id": a.chat, "message_id": a.message, "text": chunks(f.systemText(a.title+"\n\nSelected: "+value), 4096)[0], "reply_markup": map[string]any{"inline_keyboard": [][]any{}}}, nil)
+	return f.api(ctx, "editMessageText", map[string]any{"chat_id": a.chat, "message_id": a.message, "text": chunks(f.selectedText(a, value), 4096)[0], "reply_markup": map[string]any{"inline_keyboard": [][]any{}}}, nil)
+}
+
+// selectedText keeps an edited dialog in the header style it was first sent with.
+func (f *Frontend) selectedText(a answer, value string) string {
+	if a.compact {
+		return f.decorate(a.title+" → "+value, true)
+	}
+	return f.decorate(a.title+"\n\nSelected: "+value, false)
 }
 func chunks(s string, limit int) []string {
 	var out []string
@@ -576,11 +588,40 @@ func waitRetry(ctx context.Context, d time.Duration) error {
 	}
 }
 
+// System notice header styles. An empty style behaves as SystemStyleFull.
+const (
+	SystemStyleFull    = "full"    // prefix · System, divider, then the text
+	SystemStyleCompact = "compact" // prefix · text, on one line
+	SystemStyleAuto    = "auto"    // compact for single-line notices, full otherwise
+)
+
 // System notices use plain text so arbitrary model names and errors remain safe.
 func (f *Frontend) systemText(text string) string {
+	return f.decorate(text, f.compact(text))
+}
+
+// compact reports whether a notice whose shape is defined by text uses the one-line header.
+func (f *Frontend) compact(text string) bool {
+	switch f.opt.SystemStyle {
+	case SystemStyleCompact:
+		return true
+	case SystemStyleAuto:
+		return !strings.Contains(strings.TrimSpace(text), "\n")
+	default:
+		return false
+	}
+}
+
+func (f *Frontend) decorate(text string, compact bool) string {
 	prefix := strings.TrimSpace(f.opt.SystemPrefix)
 	// Keep enough space for the notice, even with an unusually long custom prefix.
 	prefix = chunks(prefix, 256)[0]
+	if compact {
+		if prefix == "" {
+			prefix = "System"
+		}
+		return prefix + " · " + text
+	}
 	if prefix != "" {
 		prefix += " · "
 	}

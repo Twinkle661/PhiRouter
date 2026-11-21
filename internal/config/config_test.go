@@ -42,6 +42,11 @@ func TestValidation(t *testing.T) {
 		t.Fatal("public MCP accepted")
 	}
 	c.MCP.Listen = "127.0.0.1:8081"
+	c.Telegram.SystemStyle = "tiny"
+	if c.Validate() == nil {
+		t.Fatal("unknown system style accepted")
+	}
+	c.Telegram.SystemStyle = "auto"
 	c.Stream.Separators = []string{""}
 	if c.Validate() == nil {
 		t.Fatal("empty delimiter accepted")
