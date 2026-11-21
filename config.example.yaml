@@ -45,6 +45,33 @@ api:
   listen: "127.0.0.1:8080"
 mcp:
   listen: "127.0.0.1:8081"
+  tools:
+    # send_file is always available. send_voice lets the agent speak: text is
+    # synthesized and sent as a voice message (as a file if over 60 s).
+    send_voice:
+      enabled: false
+      style:
+        enabled: true      # offer the agent a per-message "style" (emotion, mood, pace)
+        base: ""           # fixed delivery notes; the agent's style is appended
+      provider:
+        type: openai_speech   # any OpenAI-compatible /audio/speech endpoint
+        options:              # api_key via ROUTER_MCP__TOOLS__SEND_VOICE__PROVIDER__OPTIONS__API_KEY
+          base_url: https://openrouter.ai/api/v1
+          model: openai/gpt-4o-mini-tts-2025-12-15
+          voice: nova
+          response_format: mp3   # mp3 | opus (OpenRouter: mp3)
+          speed: 0               # 0 omits the field
+          # Where style text goes in the request body (dot path). OpenRouter
+          # and OpenAI use "instructions"; only some models honour it (e.g.
+          # gpt-4o-mini-tts, Gemini TTS), so check yours or disable style.
+          style_field: instructions
+          extra_body: {}         # merged into every request
+          timeout: 60s
+          # DeepInfra instead:
+          # base_url: https://api.deepinfra.com/v1/openai
+          # model: hexgrad/Kokoro-82M
+          # voice: af_bella
+          # (Kokoro has no style support: set style.enabled: false)
 # Public webhook listener; started only if a frontend declares ingress.path.
 # ingress:
 #   listen: "0.0.0.0:8443"

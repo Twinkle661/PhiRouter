@@ -84,7 +84,28 @@ func (s *Store) Inspect(path string) (core.Part, error) {
 	}
 	return core.Part{Type: kind, Path: filepath.Join(s.Dir, rel), MIME: mt, Size: st.Size()}, nil
 }
+
+// Save stores an inbound file under in/ with a random name.
 func (s *Store) Save(ctx context.Context, name, mt string, r io.Reader, limit int64) (core.Part, error) {
+	return s.save(ctx, "in", name, mt, r, limit)
+}
+
+// SaveOut stores a router-generated outbound file under out/ with a random
+// name. Callers that only need the file for one delivery should Remove it
+// afterwards; otherwise Cleanup removes it after the TTL.
+func (s *Store) SaveOut(ctx context.Context, name, mt string, r io.Reader, limit int64) (core.Part, error) {
+	return s.save(ctx, "out", name, mt, r, limit)
+}
+
+// Remove deletes a file inside the media directory.
+func (s *Store) Remove(path string) error {
+	rel, err := s.relative(path)
+	if err != nil {
+		return err
+	}
+	return s.root.Remove(rel)
+}
+func (s *Store) save(ctx context.Context, dir, name, mt string, r io.Reader, limit int64) (core.Part, error) {
 	id := make([]byte, 16)
 	if _, err := rand.Read(id); err != nil {
 		return core.Part{}, err
@@ -95,7 +116,7 @@ func (s *Store) Save(ctx context.Context, name, mt string, r io.Reader, limit in
 	if len(ext) > 16 || strings.ContainsAny(ext, "/\\") {
 		ext = ""
 	}
-	rel := fmt.Sprintf("in/%x-%x-%x-%x-%x%s", id[:4], id[4:6], id[6:8], id[8:10], id[10:], ext)
+	rel := fmt.Sprintf("%s/%x-%x-%x-%x-%x%s", dir, id[:4], id[4:6], id[6:8], id[8:10], id[10:], ext)
 	f, err := s.root.OpenFile(rel, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		return core.Part{}, err

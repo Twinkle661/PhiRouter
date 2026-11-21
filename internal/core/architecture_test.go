@@ -12,7 +12,7 @@ import (
 
 func TestDependencyDirection(t *testing.T) {
 	root := filepath.Join("..", "..")
-	for _, dir := range []string{"adapters", "internal/router", "internal/ingress", "plugins"} {
+	for _, dir := range []string{"adapters", "internal/router", "internal/ingress", "plugins", "internal/tools"} {
 		err := filepath.WalkDir(filepath.Join(root, dir), func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
