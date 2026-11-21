@@ -26,6 +26,7 @@ import (
 const downloadLimit int64 = 20 * 1024 * 1024
 
 type Options struct {
+	SystemPrefix    string
 	Token           string
 	UserID          int64
 	Media           core.MediaStore
@@ -175,7 +176,7 @@ func (f *Frontend) Run(ctx context.Context, receive func(context.Context, core.E
 				if u.Message != nil && u.Message.From.ID == f.opt.UserID {
 					chat = u.Message.Chat.ID
 				}
-				if e := f.Send(ctx, strconv.FormatInt(chat, 10), core.Envelope{Parts: []core.Part{{Type: core.PartText, Text: "[system] " + err.Error()}}}); e != nil {
+				if e := f.Send(ctx, strconv.FormatInt(chat, 10), core.Envelope{System: true, Parts: []core.Part{{Type: core.PartText, Text: "Something went wrong ᗜ⩊ᗜ\n\n" + err.Error()}}}); e != nil {
 					slog.Error("system message failed", "error", e, "message", err.Error())
 				}
 			}
@@ -305,9 +306,16 @@ func (f *Frontend) download(ctx context.Context, a file) (core.Part, error) {
 func (f *Frontend) Send(ctx context.Context, chat string, e core.Envelope) error {
 	for _, p := range e.Parts {
 		if p.Type == core.PartText {
-			for _, text := range chunks(p.Text, 4096) {
+			limit := 4096
+			if e.System {
+				limit -= len([]rune(f.systemText(""))) * 2
+			}
+			for _, text := range chunks(p.Text, limit) {
 				if strings.TrimSpace(text) == "" {
 					continue
+				}
+				if e.System {
+					text = f.systemText(text)
 				}
 				if err := f.api(ctx, "sendMessage", map[string]any{"chat_id": chat, "text": text}, nil); err != nil {
 					return err
@@ -438,7 +446,7 @@ func (f *Frontend) Dialog(ctx context.Context, chat string, d core.Dialog) error
 	if text == "" {
 		text = "Please reply."
 	}
-	text = chunks(text, 4096)[0]
+	text = chunks(f.systemText(text), 4096)[0]
 	body := map[string]any{"chat_id": chat, "text": text}
 	expiry := time.Time{}
 	if d.TimeoutMS > 0 {
@@ -524,7 +532,7 @@ func (f *Frontend) selected(ctx context.Context, a answer) error {
 	if a.reply.Cancelled {
 		value = "Cancelled"
 	}
-	return f.api(ctx, "editMessageText", map[string]any{"chat_id": a.chat, "message_id": a.message, "text": chunks(a.title+"\nSelected: "+value, 4096)[0], "reply_markup": map[string]any{"inline_keyboard": [][]any{}}}, nil)
+	return f.api(ctx, "editMessageText", map[string]any{"chat_id": a.chat, "message_id": a.message, "text": chunks(f.systemText(a.title+"\n\nSelected: "+value), 4096)[0], "reply_markup": map[string]any{"inline_keyboard": [][]any{}}}, nil)
 }
 func chunks(s string, limit int) []string {
 	var out []string
@@ -562,4 +570,15 @@ func waitRetry(ctx context.Context, d time.Duration) error {
 	case <-timer.C:
 		return nil
 	}
+}
+
+// System notices use plain text so arbitrary model names and errors remain safe.
+func (f *Frontend) systemText(text string) string {
+	prefix := strings.TrimSpace(f.opt.SystemPrefix)
+	// Keep enough space for the notice, even with an unusually long custom prefix.
+	prefix = chunks(prefix, 256)[0]
+	if prefix != "" {
+		prefix += " · "
+	}
+	return prefix + "System\n━━━━━━━━━━━━\n" + text
 }

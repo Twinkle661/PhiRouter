@@ -179,11 +179,12 @@ func (b *Backend) Status(ctx context.Context) (core.BackendState, error) {
 	var result struct {
 		Model               core.Model
 		PendingMessageCount int
+		SessionID           string `json:"sessionId"`
 	}
 	if err = json.Unmarshal(data, &result); err != nil {
 		return core.BackendState{}, err
 	}
-	return core.BackendState{Model: result.Model, PendingMessages: result.PendingMessageCount}, nil
+	return core.BackendState{SessionID: result.SessionID, Model: result.Model, PendingMessages: result.PendingMessageCount}, nil
 }
 func (b *Backend) Models(ctx context.Context) ([]core.Model, error) {
 	data, err := b.rpc(ctx, "get_available_models", nil)

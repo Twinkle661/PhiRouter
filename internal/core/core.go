@@ -27,6 +27,7 @@ type Part struct {
 	Caption string   `json:"caption,omitempty" yaml:"caption,omitempty"`
 }
 type Envelope struct {
+	System  bool   `json:"-"`
 	Route   string `json:"route,omitempty"`
 	Source  string `json:"-"`
 	Channel bool   `json:"-"`
@@ -61,6 +62,7 @@ const (
 type Submission struct{ Handled bool }
 type Model struct{ Provider, ID string }
 type BackendState struct {
+	SessionID       string
 	Model           Model
 	PendingMessages int
 }

@@ -1,11 +1,15 @@
 package main
 
 import (
+	"PhiRouter/internal/core"
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestMCPRegistrationPreservesEntries(t *testing.T) {
@@ -29,5 +33,30 @@ func TestMCPRegistrationPreservesEntries(t *testing.T) {
 	_ = os.WriteFile(path, []byte(`null`), 0600)
 	if err := registerMCP(path, "endpoint"); err == nil {
 		t.Fatal("null config accepted")
+	}
+}
+
+type noticeFrontend struct {
+	core.Frontend
+	t     *testing.T
+	calls int
+}
+
+func (f *noticeFrontend) Send(ctx context.Context, chat string, e core.Envelope) error {
+	f.calls++
+	deadline, ok := ctx.Deadline()
+	if ctx.Err() != nil || !ok || time.Until(deadline) > 5*time.Second {
+		f.t.Error("notice needs a live, bounded context")
+	}
+	if chat != "42" || !e.System || e.Parts[0].Text != "Server shutting down" {
+		f.t.Errorf("unexpected notice: %+v", e)
+	}
+	return errors.New("Telegram unavailable")
+}
+func TestLifecycleNoticeFailureIsNonfatal(t *testing.T) {
+	f := &noticeFrontend{t: t}
+	notifyLifecycle(f, 42, "Server shutting down")
+	if f.calls != 1 {
+		t.Fatal("notification not attempted")
 	}
 }

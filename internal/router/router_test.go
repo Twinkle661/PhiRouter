@@ -57,7 +57,7 @@ func (f *fakeBackend) Submit(_ context.Context, e core.Envelope, mode core.Deliv
 	return core.Submission{}, nil
 }
 func (f *fakeBackend) Status(context.Context) (core.BackendState, error) {
-	return core.BackendState{Model: core.Model{Provider: "test", ID: "model"}}, nil
+	return core.BackendState{SessionID: "session-123", Model: core.Model{Provider: "test", ID: "model"}}, nil
 }
 func (f *fakeBackend) Models(context.Context) ([]core.Model, error) {
 	return []core.Model{{Provider: "test", ID: "model"}}, nil
@@ -248,8 +248,27 @@ func TestToolOutputSummarizesOnlyStartAndEnd(t *testing.T) {
 			}
 			continue
 		}
-		if strings.Join(f.texts, "|") != "[system] Tool started: bash|[system] Tool failed: bash (1s)" {
+		if strings.Join(f.texts, "|") != "Tool started: bash|Tool failed: bash (1s)" {
 			t.Fatalf("unexpected tool output: %v", f.texts)
+		}
+	}
+}
+
+func TestSessionCommandsShowDetails(t *testing.T) {
+	f, b := &fakeFrontend{}, &fakeBackend{}
+	r := New(Options{DefaultSource: "fake:1"}, map[string]core.Frontend{"fake": f}, map[string]core.Backend{"test:default": b})
+	s := r.states["test:default"]
+	s.ready = true
+	for _, command := range []string{"/new session", "/status"} {
+		handled, err := r.command(context.Background(), "test:default", s, env(command))
+		if err != nil || !handled {
+			t.Fatalf("%s: %v", command, err)
+		}
+		text := f.texts[len(f.texts)-1]
+		for _, detail := range []string{"Session: session-123", "Provider: test", "Model: model"} {
+			if !strings.Contains(text, detail) {
+				t.Fatalf("missing %q in %q", detail, text)
+			}
 		}
 	}
 }

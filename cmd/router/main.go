@@ -84,7 +84,7 @@ func run() error {
 	if err = registerMCP(filepath.Join(agentDir, "mcp.json"), "http://"+c.MCP.Listen+"/mcp"); err != nil {
 		return err
 	}
-	tg := telegram.New(telegram.Options{Token: c.Telegram.Token, UserID: c.Telegram.UserID, Media: store, VoiceMaxSeconds: c.Media.VoiceMaxSeconds})
+	tg := telegram.New(telegram.Options{SystemPrefix: c.Telegram.SystemPrefix, Token: c.Telegram.Token, UserID: c.Telegram.UserID, Media: store, VoiceMaxSeconds: c.Media.VoiceMaxSeconds})
 	var hooks []core.Hook
 	for _, p := range c.Plugins {
 		if p.Type == "prefix" {
@@ -133,6 +133,7 @@ func run() error {
 			}
 		}()
 	}
+	notifyLifecycle(tg, c.Telegram.UserID, "Server started ₍^ >ヮ<^₎ .ᐟ.ᐟ\n\nPhiRouter is online. Backends are connecting; messages will queue until ready.")
 	routerDone := make(chan struct{})
 	go func() { defer close(routerDone); _ = rt.Run(routerCtx) }()
 	for key, b := range backends {
@@ -173,6 +174,7 @@ func run() error {
 	case <-sigCtx.Done():
 	case err = <-errs:
 	}
+	notifyLifecycle(tg, c.Telegram.UserID, "Server shutting down ᗜ⩊ᗜ\n\nPhiRouter is going offline. You can send messages again after it restarts.")
 	cancelWorkers()
 	shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -218,4 +220,12 @@ func registerMCP(path, endpoint string) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+func notifyLifecycle(f core.Frontend, userID int64, text string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := f.Send(ctx, strconv.FormatInt(userID, 10), core.Envelope{System: true, Parts: []core.Part{{Type: core.PartText, Text: text}}}); err != nil {
+		slog.Error("lifecycle notification failed", "error", err)
+	}
 }

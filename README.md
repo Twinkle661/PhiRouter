@@ -74,9 +74,9 @@ Multiple pi backend instances can be declared and routed independently; add dist
 - `/retry`: resubmit the most recent successfully accepted user envelope, including attachments.
 - `/restart`: capture the current session and restart pi.
 - `/model`: show available models; `/model provider/model-id` selects directly.
-- `/new`: create a session and clear retry history after success.
+- `/new`: create a session, clear retry history after success, and display the session ID, provider, and model.
 - `/abort`: clear queued work and abort the current generation.
-- `/status`: display readiness, busy state, model, and queue length.
+- `/status`: display readiness, session ID, provider, model, activity, and queue length.
 
 Unknown slash commands pass through pi's `prompt` command, even while busy, preserving extension-command support. Normal user messages request `steer` while busy; plugin messages request `follow_up`. The pi adapter implements those policies through `prompt.streamingBehavior` so a run ending during dispatch cannot strand a queued message. Plugin slash commands are rejected while busy, because pi executes extension commands immediately even with a streaming policy. Steering follows pi's turn/tool boundaries; it does not kill an in-progress tool. Only `agent_settled` makes a backend idle.
 
@@ -123,7 +123,7 @@ Pi exits trigger exponential restart backoff (1–60 seconds, reset after a minu
 
 Interactive backend operations have a 20-second caller deadline. A timeout ends that call and removes its pending response waiter; it does not close pi's stdin, kill pi, or replay the operation. Each pi process has one serialized writer, so callers can time out even while stdin is blocked without interrupting a partially written JSONL record. A command whose write has begun may still execute after timeout; treat its outcome as uncertain. Late responses cannot satisfy a different request. Startup session restoration uses the process lifecycle context instead of a fixed RPC deadline, allowing slow extension dialogs; shutdown still cancels it.
 
-SIGTERM stops polling and HTTP admission, flushes buffered bubbles, then closes pi stdin with a bounded wait before killing the child. Errors use `[system]` messages when the frontend is available; delivery failures use structured stdout logs. No durable message queue or exactly-once delivery is promised.
+SIGTERM stops polling and HTTP admission, flushes buffered bubbles, then closes pi stdin with a bounded wait before killing the child. Startup and graceful shutdown send a best-effort notice to the configured Telegram user (with a five-second timeout). Forced termination or power loss cannot send a shutdown notice. Errors use visibly labeled system messages when the frontend is available; delivery failures use structured stdout logs. No durable message queue or exactly-once delivery is promised.
 
 `go test ./...` covers fake frontend/backend scheduling, stream boundaries, recovery and real subprocess framing, Telegram HTTP/dialog flows, auth, MCP delivery, path confinement, config layering, and package dependencies. The Telegram tests open local loopback sockets. `go test -race ./...` additionally needs a C compiler. Real Telegram/provider credentials are intentionally not required by the suite. See [DECISIONS.md](DECISIONS.md) for implementation choices and operational limits.
 
@@ -139,3 +139,5 @@ docker run --rm --network none --entrypoint node \
 ```
 
 The smoke script verifies real pi MCP discovery, bearer authentication, path rejection, liveness, and graceful shutdown. Audio tests exercise real ffprobe when ffmpeg is installed; they otherwise report a skip.
+
+Telegram system notices and dialogs use a separate `System` header, a divider, and readable multiline details. Set `telegram.system_prefix` (default `𝑴𝒆𝒐𝒘☕︎`) or `ROUTER_TELEGRAM__SYSTEM_PREFIX` to customize the decoration; an empty string keeps the System label. Agent replies remain unchanged. Session fields unavailable from the backend are shown as `Unavailable`.

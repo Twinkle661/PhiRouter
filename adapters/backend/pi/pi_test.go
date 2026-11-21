@@ -43,6 +43,7 @@ func TestRPCProcess(t *testing.T) {
 			}
 			data["cancelled"] = false
 		case "get_state":
+			data["sessionId"] = "session-123"
 			data["sessionFile"] = "/tmp/test-session.jsonl"
 			data["model"] = map[string]string{"provider": "test", "id": "expected"}
 		case "get_available_models":
@@ -204,7 +205,7 @@ func TestCommandTimeoutDoesNotKillProcess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("process unusable after timeout: %v", err)
 	}
-	if state.Model.ID != "expected" {
+	if state.Model.ID != "expected" || state.SessionID != "session-123" {
 		t.Fatalf("late response matched a new request: %+v", state)
 	}
 	b.mu.Lock()

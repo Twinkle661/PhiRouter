@@ -197,7 +197,7 @@ func (r *Router) dispatch(ctx context.Context, s *state, e core.Envelope) error 
 		}
 		s.queue = append(s.queue, e)
 		if e.Channel {
-			r.system(ctx, s, "Backend restarting, message queued.")
+			r.system(ctx, s, "Your message is queued ᗜ⩊ᗜ\n\nThe backend is starting or reconnecting. I’ll send it when ready.")
 		}
 		return nil
 	}
@@ -269,7 +269,7 @@ func (r *Router) send(ctx context.Context, source string, e core.Envelope) error
 	return err
 }
 func (r *Router) system(ctx context.Context, s *state, text string) {
-	if err := r.send(ctx, s.source, core.Envelope{Parts: []core.Part{{Type: core.PartText, Text: "[system] " + text}}}); err != nil {
+	if err := r.send(ctx, s.source, core.Envelope{System: true, Parts: []core.Part{{Type: core.PartText, Text: text}}}); err != nil {
 		slog.Error("system message delivery failed", "message", text, "error", err)
 	}
 }
@@ -384,7 +384,7 @@ func (r *Router) setModel(ctx context.Context, s *state, value string) error {
 		return s.backend.SetModel(ctx, core.Model{Provider: provider, ID: model})
 	})
 	if err == nil {
-		r.system(ctx, s, "Model selected: "+value)
+		r.system(ctx, s, "Model updated ₍^ >ヮ<^₎ .ᐟ.ᐟ\n\nProvider: "+provider+"\nModel: "+model)
 	}
 	return err
 }
@@ -398,14 +398,14 @@ func (r *Router) command(ctx context.Context, key string, s *state, e core.Envel
 	switch name {
 	case "/status":
 		if !s.ready {
-			r.system(ctx, s, fmt.Sprintf("Backend restarting. Queue: %d.", len(s.queue)))
+			r.system(ctx, s, fmt.Sprintf("Backend reconnecting ᗜ⩊ᗜ\n\nQueued messages: %d", len(s.queue)))
 			return true, nil
 		}
 		st, err := call(ctx, s.backend.Status)
 		if err != nil {
 			return true, err
 		}
-		r.system(ctx, s, fmt.Sprintf("Backend ready. Busy: %t. Model: %s/%s. Queue: %d.", s.busy, st.Model.Provider, st.Model.ID, len(s.queue)+st.PendingMessages))
+		r.system(ctx, s, fmt.Sprintf("Current session 𑄝\n\n%s\nActivity: %s\nQueued messages: %d", sessionDetails(st), activity(s.busy), len(s.queue)+st.PendingMessages))
 		return true, nil
 	case "/restart":
 		if s.ready {
@@ -435,7 +435,11 @@ func (r *Router) command(ctx context.Context, key string, s *state, e core.Envel
 	switch name {
 	case "/abort":
 		s.queue = nil
-		return true, action(ctx, s.backend.Abort)
+		err := action(ctx, s.backend.Abort)
+		if err == nil {
+			r.system(ctx, s, "Generation stopped ᗜ⩊ᗜ\n\nPending messages have been cleared.")
+		}
+		return true, err
 	case "/new":
 		created, err := call(ctx, s.backend.NewSession)
 		if err != nil {
@@ -448,11 +452,13 @@ func (r *Router) command(ctx context.Context, key string, s *state, e core.Envel
 		s.last = nil
 		s.busy = false
 		s.models = map[string]string{}
-		_, err = call(ctx, s.backend.Status)
-		if err == nil {
-			r.system(ctx, s, "New session started.")
+		st, statusErr := call(ctx, s.backend.Status)
+		if statusErr != nil {
+			r.system(ctx, s, "New session started ₍^ >ヮ<^₎ .ᐟ.ᐟ\n\nSession details are temporarily unavailable. Try /status.")
+			return true, nil
 		}
-		return true, err
+		r.system(ctx, s, "New session started ₍^ >ヮ<^₎ .ᐟ.ᐟ\n\n"+sessionDetails(st))
+		return true, nil
 	case "/model":
 		if len(args) > 1 {
 			return true, r.setModel(ctx, s, args[1])
@@ -513,4 +519,20 @@ func toolSummary(tool core.ToolEvent) string {
 	default:
 		return ""
 	}
+}
+
+func sessionDetails(st core.BackendState) string {
+	display := func(value string) string {
+		if value == "" {
+			return "Unavailable"
+		}
+		return value
+	}
+	return fmt.Sprintf("Session: %s\nProvider: %s\nModel: %s", display(st.SessionID), display(st.Model.Provider), display(st.Model.ID))
+}
+func activity(busy bool) string {
+	if busy {
+		return "Generating a reply"
+	}
+	return "Ready for your message"
 }

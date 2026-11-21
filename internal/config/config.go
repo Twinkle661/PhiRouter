@@ -24,8 +24,9 @@ type Config struct {
 	Backends  map[string]Backend  `yaml:"backends"`
 	Routes    []Route             `yaml:"routes"`
 	Telegram  struct {
-		Token  string `yaml:"token"`
-		UserID int64  `yaml:"user_id"`
+		SystemPrefix string `yaml:"system_prefix"`
+		Token        string `yaml:"token"`
+		UserID       int64  `yaml:"user_id"`
 	} `yaml:"telegram"`
 	Stream struct {
 		Separators    []string `yaml:"separators"`
@@ -70,6 +71,7 @@ func Defaults() Config {
 	c.Frontends = map[string]Frontend{"telegram": {Type: "telegram"}}
 	c.Backends = map[string]Backend{"default": {Type: "pi", Command: []string{"pi", "--mode", "rpc"}}}
 	c.Routes = []Route{{"telegram:*", "pi:default"}}
+	c.Telegram.SystemPrefix = "𝑴𝒆𝒐𝒘☕︎"
 	c.Stream.Separators = []string{"\n", "<break />"}
 	c.Media.Dir = "/data/media"
 	c.Media.InlineImageMaxMB = 5

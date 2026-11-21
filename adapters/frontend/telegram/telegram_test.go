@@ -145,3 +145,49 @@ func TestVoiceDetectionWithFFprobe(t *testing.T) {
 		}
 	}
 }
+
+func TestSystemNoticesAndAgentText(t *testing.T) {
+	var texts []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct{ Text string }
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		texts = append(texts, body.Text)
+		fmt.Fprint(w, `{"ok":true,"result":{"message_id":1}}`)
+	}))
+	defer server.Close()
+	f := New(Options{BaseURL: server.URL, SystemPrefix: "𝑴𝒆𝒐𝒘☕︎"})
+	ctx := context.Background()
+	agent := "[system] literal agent text <tag> & *markdown*"
+	if err := f.Send(ctx, "42", core.Envelope{Parts: []core.Part{{Type: core.PartText, Text: agent}}}); err != nil {
+		t.Fatal(err)
+	}
+	if texts[0] != agent {
+		t.Fatal("agent text was decorated")
+	}
+	body := strings.Repeat("🐈", 5000)
+	if err := f.Send(ctx, "42", core.Envelope{System: true, Parts: []core.Part{{Type: core.PartText, Text: body}}}); err != nil {
+		t.Fatal(err)
+	}
+	header := "𝑴𝒆𝒐𝒘☕︎ · System\n━━━━━━━━━━━━\n"
+	var restored string
+	for _, text := range texts[1:] {
+		if !strings.HasPrefix(text, header) {
+			t.Fatalf("missing header: %q", text)
+		}
+		if len(chunks(text, 4096)) != 1 {
+			t.Fatal("oversized Telegram message")
+		}
+		restored += strings.TrimPrefix(text, header)
+	}
+	if restored != body {
+		t.Fatal("notice text lost during chunking")
+	}
+	if err := f.Dialog(ctx, "42", core.Dialog{Title: "Choose a model", Method: "select", Options: []string{"provider/model"}}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(texts[len(texts)-1], header) {
+		t.Fatal("dialog missing system header")
+	}
+}
