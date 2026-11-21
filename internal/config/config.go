@@ -23,6 +23,8 @@ type Timestamp struct {
 	Enabled  bool   `yaml:"enabled"`
 	Timezone string `yaml:"timezone"`
 	Format   string `yaml:"format"`
+	// Location is resolved from Timezone by Load when Enabled; not configurable.
+	Location *time.Location `yaml:"-"`
 }
 
 type Config struct {
@@ -137,7 +139,14 @@ func Load(path, dotenv string) (Config, error) {
 			return c, fmt.Errorf("%s: %w", k, err)
 		}
 	}
-	return c, c.Validate()
+	if err = c.Validate(); err != nil {
+		return c, err
+	}
+	if c.Timestamp.Enabled {
+		// Validate has already checked the zone, so this cannot fail.
+		c.Timestamp.Location, _ = time.LoadLocation(c.Timestamp.Timezone)
+	}
+	return c, nil
 }
 func readEnv(path string) (map[string]string, error) {
 	out := map[string]string{}

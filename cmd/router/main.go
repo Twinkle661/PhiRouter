@@ -95,14 +95,7 @@ func run() error {
 	for _, r := range c.Routes {
 		routes = append(routes, router.Route{From: r.From, To: r.To})
 	}
-	var timestamp router.TimestampOptions
-	if c.Timestamp.Enabled {
-		loc, err := time.LoadLocation(c.Timestamp.Timezone)
-		if err != nil {
-			return err
-		}
-		timestamp = router.TimestampOptions{Enabled: true, Location: loc, Format: c.Timestamp.Format}
-	}
+	timestamp := router.TimestampOptions{Enabled: c.Timestamp.Enabled, Location: c.Timestamp.Location, Format: c.Timestamp.Format}
 	rt := router.New(router.Options{Timestamp: timestamp, Routes: routes, DefaultSource: "telegram:" + strconv.FormatInt(c.Telegram.UserID, 10), Separators: c.Stream.Separators, ShowTools: c.Stream.ShowToolCalls, QueueLimit: c.QueueLimit, Hooks: hooks}, map[string]core.Frontend{"telegram": tg}, backends)
 	apiListener, err := net.Listen("tcp", c.API.Listen)
 	if err != nil {

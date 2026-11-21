@@ -31,8 +31,11 @@ type Envelope struct {
 	Route   string `json:"route,omitempty"`
 	Source  string `json:"-"`
 	Channel bool   `json:"-"`
-	Parts   []Part `json:"parts"`
-	Reply   *Reply `json:"-"`
+	// Time is when the user sent the message, as reported by the frontend.
+	// Zero means unknown; the router then uses its own acceptance time.
+	Time  time.Time `json:"-"`
+	Parts []Part    `json:"parts"`
+	Reply *Reply    `json:"-"`
 }
 type Reply struct {
 	ID, Value            string

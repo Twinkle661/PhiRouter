@@ -58,13 +58,13 @@ func TestTimestampConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !c.Timestamp.Enabled || c.Timestamp.Timezone != "Europe/London" || c.Timestamp.Format != "[15:04] " {
+	if !c.Timestamp.Enabled || c.Timestamp.Timezone != "Europe/London" || c.Timestamp.Format != "[15:04] " || c.Timestamp.Location == nil || c.Timestamp.Location.String() != "Europe/London" {
 		t.Fatalf("incorrect config: %+v", c.Timestamp)
 	}
 	t.Setenv("ROUTER_TIMESTAMP__TIMEZONE", "Asia/Shanghai")
 	t.Setenv("ROUTER_TIMESTAMP__FORMAT", "15:04\n")
 	c, err = Load(path, filepath.Join(dir, ".env"))
-	if err != nil || c.Timestamp.Timezone != "Asia/Shanghai" || c.Timestamp.Format != "15:04\n" {
+	if err != nil || c.Timestamp.Timezone != "Asia/Shanghai" || c.Timestamp.Format != "15:04\n" || c.Timestamp.Location.String() != "Asia/Shanghai" {
 		t.Fatalf("override failed: %+v %v", c.Timestamp, err)
 	}
 	for _, zone := range []string{"", "Invalid/Zone"} {

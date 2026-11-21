@@ -91,3 +91,31 @@ func TestTimestampAcceptanceQueueRecoveryAndRetry(t *testing.T) {
 		t.Fatal("disabled timestamp applied")
 	}
 }
+
+func TestTimestampUsesSendTimeAndSkipsSlashCommands(t *testing.T) {
+	ctx := context.Background()
+	b, f := &fakeBackend{}, &fakeFrontend{}
+	r := New(Options{Routes: []Route{{"fake:*", "test:default"}}, Timestamp: TimestampOptions{Enabled: true, Format: "[15:04] "}}, map[string]core.Frontend{"fake": f}, map[string]core.Backend{"test:default": b})
+	r.event(ctx, "test:default", r.states["test:default"], core.Event{Type: "ready"})
+	sent := env("backlog")
+	sent.Channel = true
+	sent.Time = time.Date(2026, 11, 21, 3, 15, 0, 0, time.UTC)
+	if err := r.accept(ctx, sent); err != nil {
+		t.Fatal(err)
+	}
+	skill := env("  /skill:poem moon")
+	skill.Channel = true
+	if err := r.accept(ctx, skill); err != nil {
+		t.Fatal(err)
+	}
+	p := b.prompts()
+	if len(p) != 2 {
+		t.Fatalf("prompts: %+v", p)
+	}
+	if got := p[0].Envelope.Parts[0].Text; got != "[03:15] backlog" {
+		t.Fatalf("send time not used: %q", got)
+	}
+	if got := p[1].Envelope.Parts[0].Text; got != "  /skill:poem moon" {
+		t.Fatalf("slash command stamped: %q", got)
+	}
+}
