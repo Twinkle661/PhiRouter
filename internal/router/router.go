@@ -19,13 +19,15 @@ type TimestampOptions struct {
 }
 
 type Options struct {
-	Timestamp     TimestampOptions
-	Routes        []Route
-	DefaultSource string
-	Separators    []string
-	ShowTools     bool
-	QueueLimit    int
-	Hooks         []core.Hook
+	Timestamp TimestampOptions
+	Routes    []Route
+	// Owners maps frontend instance names to their bound user's address. A
+	// backend reached only through wildcard routes initially replies there.
+	Owners     map[string]string
+	Separators []string
+	ShowTools  bool
+	QueueLimit int
+	Hooks      []core.Hook
 }
 type request struct {
 	e        core.Envelope
@@ -37,9 +39,11 @@ type backendEvent struct {
 	e     core.Event
 }
 type state struct {
+	key         string
 	backend     core.Backend
 	ready, busy bool
 	source      string
+	replyRef    string
 	queue       []core.Envelope
 	last        *core.Envelope
 	bubbles     Bubbles
@@ -60,7 +64,16 @@ func New(o Options, f map[string]core.Frontend, b map[string]core.Backend) *Rout
 	}
 	r := &Router{opt: o, frontends: f, states: map[string]*state{}, in: make(chan request, 64), events: make(chan backendEvent, 1024), done: make(chan struct{})}
 	for key, backend := range b {
-		r.states[key] = &state{backend: backend, source: o.DefaultSource, bubbles: Bubbles{Separators: o.Separators, Limit: 4096}, models: map[string]string{}}
+		r.states[key] = &state{key: key, backend: backend, bubbles: Bubbles{Separators: o.Separators}, models: map[string]string{}}
+	}
+	// Exact routes seed the return address; otherwise the first wildcard
+	// route's frontend owner is used until inbound traffic arrives.
+	for _, route := range o.Routes {
+		if s := r.states[route.To]; s != nil && s.source == "" {
+			if name, ok := strings.CutSuffix(route.From, ":*"); ok && o.Owners[name] != "" {
+				s.source = name + ":" + o.Owners[name]
+			}
+		}
 	}
 	for _, route := range o.Routes {
 		if s := r.states[route.To]; s != nil && !strings.HasSuffix(route.From, ":*") {
@@ -68,6 +81,15 @@ func New(o Options, f map[string]core.Frontend, b map[string]core.Backend) *Rout
 		}
 	}
 	return r
+}
+
+// Receiver returns the inbound callback for a frontend instance. Adapters
+// report bare addresses; the router qualifies them with the instance name.
+func (r *Router) Receiver(frontend string) func(context.Context, core.Envelope) error {
+	return func(ctx context.Context, e core.Envelope) error {
+		e.Source = frontend + ":" + e.Source
+		return r.Inbound(ctx, e)
+	}
 }
 func (r *Router) submit(ctx context.Context, e core.Envelope, out bool) error {
 	req := request{e, out, make(chan error, 1)}
@@ -117,7 +139,7 @@ func (r *Router) Run(ctx context.Context) error {
 				if s == nil {
 					req.result <- errors.New("unknown route")
 				} else {
-					req.result <- r.send(ctx, s.source, req.e)
+					req.result <- r.deliver(ctx, s, req.e)
 				}
 			} else {
 				req.result <- r.accept(ctx, req.e)
@@ -184,6 +206,9 @@ func (r *Router) accept(ctx context.Context, e core.Envelope) error {
 	s := r.states[key]
 	if e.Channel {
 		s.source = e.Source
+		if e.Reply == nil {
+			s.replyRef = e.ReplyRef
+		}
 	}
 	if e.Reply != nil {
 		return r.reply(ctx, s, *e.Reply)
@@ -285,6 +310,19 @@ func action(ctx context.Context, fn func(context.Context) error) error {
 	_, err := call(ctx, func(ctx context.Context) (struct{}, error) { return struct{}{}, fn(ctx) })
 	return err
 }
+
+// deliver sends to a conversation's current address, attaching its latest
+// inbound reference. Platform refusals are reported to hooks, not retried.
+func (r *Router) deliver(ctx context.Context, s *state, e core.Envelope) error {
+	if e.ReplyRef == "" {
+		e.ReplyRef = s.replyRef
+	}
+	err := r.send(ctx, s.source, e)
+	if errors.Is(err, core.ErrSendNotAllowed) {
+		r.observe(ctx, s.key, core.Event{Type: "send_not_allowed", Text: err.Error()})
+	}
+	return err
+}
 func (r *Router) send(ctx context.Context, source string, e core.Envelope) error {
 	for _, h := range r.opt.Hooks {
 		next, drop, err := h.OnOutbound(ctx, clone(e))
@@ -302,24 +340,32 @@ func (r *Router) send(ctx context.Context, source string, e core.Envelope) error
 		return fmt.Errorf("unknown frontend %s", source)
 	}
 	err := f.Send(ctx, chat, e)
-	if err != nil {
+	if errors.Is(err, core.ErrSendNotAllowed) {
+		slog.Warn("frontend refused delivery", "source", source, "error", err)
+	} else if err != nil {
 		slog.Error("frontend send failed", "source", source, "error", err)
 	}
 	return err
 }
 func (r *Router) system(ctx context.Context, s *state, text string) {
-	if err := r.send(ctx, s.source, core.Envelope{System: true, Parts: []core.Part{{Type: core.PartText, Text: text}}}); err != nil {
+	if err := r.deliver(ctx, s, core.Envelope{System: true, Parts: []core.Part{{Type: core.PartText, Text: text}}}); err != nil {
 		slog.Error("system message delivery failed", "message", text, "error", err)
 	}
 }
 func (r *Router) flush(ctx context.Context, s *state, text string, final bool) {
 	for _, bubble := range s.bubbles.Feed(text, final) {
-		if err := r.send(ctx, s.source, core.Envelope{Parts: []core.Part{{Type: core.PartText, Text: bubble}}}); err != nil {
+		if err := r.deliver(ctx, s, core.Envelope{Parts: []core.Part{{Type: core.PartText, Text: bubble}}}); err != nil {
 			slog.Error("bubble delivery failed", "error", err)
 		}
 	}
 }
 func (r *Router) event(ctx context.Context, key string, s *state, e core.Event) {
+	r.observe(ctx, key, e)
+	r.handle(ctx, s, e)
+}
+
+// observe gives each hook its own copy of an event.
+func (r *Router) observe(ctx context.Context, key string, e core.Event) {
 	for _, h := range r.opt.Hooks {
 		copy := e
 		copy.Data = append(json.RawMessage(nil), e.Data...)
@@ -336,6 +382,8 @@ func (r *Router) event(ctx context.Context, key string, s *state, e core.Event) 
 			slog.Error("event hook failed", "error", err)
 		}
 	}
+}
+func (r *Router) handle(ctx context.Context, s *state, e core.Event) {
 	switch e.Type {
 	case "ready":
 		s.ready = true

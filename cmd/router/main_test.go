@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/Twinkle661/PhiRouter/adapters/frontend/telegram"
+	"github.com/Twinkle661/PhiRouter/internal/config"
 	"github.com/Twinkle661/PhiRouter/internal/core"
 	"os"
 	"path/filepath"
@@ -55,8 +57,24 @@ func (f *noticeFrontend) Send(ctx context.Context, chat string, e core.Envelope)
 }
 func TestLifecycleNoticeFailureIsNonfatal(t *testing.T) {
 	f := &noticeFrontend{t: t}
-	notifyLifecycle(f, 42, "Server shutting down")
+	notifyLifecycle(f, "42", "Server shutting down")
 	if f.calls != 1 {
 		t.Fatal("notification not attempted")
+	}
+}
+
+func TestBuildFrontendsRejectsUnsupportedIngress(t *testing.T) {
+	opts := telegram.DefaultConfig()
+	opts.Token = "x"
+	f := config.Frontend{Type: "telegram", Owner: "42", Options: opts}
+	c := config.Config{Frontends: map[string]config.Frontend{"tg": f}}
+	built, owners, hooks, err := buildFrontends(c, nil)
+	if err != nil || built["tg"] == nil || owners["tg"] != "42" || len(hooks) != 0 {
+		t.Fatalf("telegram not built: %v", err)
+	}
+	f.Ingress.Path = "/hooks/tg"
+	c.Frontends["tg"] = f
+	if _, _, _, err = buildFrontends(c, nil); err == nil || !strings.Contains(err.Error(), "does not support ingress") {
+		t.Fatalf("unsupported ingress accepted: %v", err)
 	}
 }

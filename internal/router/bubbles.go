@@ -1,6 +1,7 @@
 package router
 
 import (
+	"math"
 	"strings"
 	"unicode/utf8"
 )
@@ -8,7 +9,9 @@ import (
 type Bubbles struct {
 	Buffer     string
 	Separators []string
-	Limit      int
+	// Limit optionally caps a bubble in UTF-16 units; zero means unlimited.
+	// The router leaves it unset: frontends enforce their own platform limits.
+	Limit int
 }
 
 // Feed retains incomplete delimiters across event boundaries.
@@ -22,7 +25,7 @@ func (b *Bubbles) Feed(s string, flush bool) []string {
 	}
 	limit := b.Limit
 	if limit <= 0 {
-		limit = 4096
+		limit = math.MaxInt
 	}
 	for b.Buffer != "" {
 		at, sepLen := -1, 0

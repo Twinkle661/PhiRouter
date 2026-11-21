@@ -5,7 +5,7 @@ import { randomBytes } from 'node:crypto';
 import assert from 'node:assert/strict';
 const exec = promisify(execFile);
 const token = randomBytes(32).toString('hex');
-const env = { ...process.env, ROUTER_TELEGRAM__TOKEN: '123:smoke', ROUTER_TELEGRAM__USER_ID: '1', ROUTER_API__TOKEN: 'smoke-injection', ROUTER_MCP__TOKEN: token, PHIROUTER_BACKEND: 'pi:default' };
+const env = { ...process.env, ROUTER_FRONTENDS__TG__OPTIONS__TOKEN: '123:smoke', ROUTER_FRONTENDS__TG__OWNER: '1', ROUTER_API__TOKEN: 'smoke-injection', ROUTER_MCP__TOKEN: token, PHIROUTER_BACKEND: 'pi:default' };
 const child = spawn('router', [], { env, stdio: ['ignore', 'pipe', 'pipe'] });
 let logs = '';
 child.stdout.on('data', b => { logs += b; });

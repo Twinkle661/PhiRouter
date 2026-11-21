@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
 	"time"
 )
 
@@ -33,9 +34,14 @@ type Envelope struct {
 	Channel bool   `json:"-"`
 	// Time is when the user sent the message, as reported by the frontend.
 	// Zero means unknown; the router then uses its own acceptance time.
-	Time  time.Time `json:"-"`
-	Parts []Part    `json:"parts"`
-	Reply *Reply    `json:"-"`
+	Time time.Time `json:"-"`
+	// ReplyRef is an opaque frontend reference to a message. Inbound, the
+	// frontend sets it to the user's message; outbound, the router sets it to
+	// the latest inbound reference for that conversation, for platforms that
+	// only allow (or prefer) replies attached to a user message.
+	ReplyRef string `json:"-"`
+	Parts    []Part `json:"parts"`
+	Reply    *Reply `json:"-"`
 }
 type Reply struct {
 	ID, Value            string
@@ -82,11 +88,30 @@ type ToolEvent struct {
 	Failed   bool
 	Duration time.Duration
 }
+
+// Frontend is a chat platform adapter. Addresses (the string arguments and
+// Envelope.Source) are opaque, adapter-defined strings without the instance
+// prefix; the router adds and strips "<instance>:" itself.
 type Frontend interface {
+	// Run receives platform events until ctx ends.
 	Run(context.Context, func(context.Context, Envelope) error) error
+	// Send delivers an envelope. The adapter enforces platform limits such as
+	// message length, splitting text as needed. It returns ErrSendNotAllowed
+	// when platform rules refuse the delivery.
 	Send(context.Context, string, Envelope) error
+	// Typing may be a no-op on platforms without typing indicators.
 	Typing(context.Context, string) error
+	// Dialog presents an interactive prompt. Adapters without suitable widgets
+	// degrade (for example to numbered text) rather than fail.
 	Dialog(context.Context, string, Dialog) error
+}
+
+// IngressFrontend is implemented by frontends that receive platform events
+// over HTTP (webhooks). The router serves the handler at the instance's
+// configured ingress path; the adapter verifies platform signatures itself.
+type IngressFrontend interface {
+	Frontend
+	Ingress() http.Handler
 }
 type Backend interface {
 	Run(context.Context, func(Event)) error
@@ -115,3 +140,9 @@ type MediaStore interface {
 }
 
 var ErrUnavailable = errors.New("backend unavailable")
+
+// ErrSendNotAllowed reports that platform rules refused a delivery, for
+// example a closed messaging window or a ban on unsolicited messages. It is
+// not a transport failure and must not be retried as one. Adapters wrap it
+// with details using fmt.Errorf("...: %w", ErrSendNotAllowed).
+var ErrSendNotAllowed = errors.New("delivery not allowed by the platform")
