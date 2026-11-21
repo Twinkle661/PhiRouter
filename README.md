@@ -11,11 +11,11 @@ The architecture is built for **many backends × many frontends**. The first rel
 | Backend | [pi](https://github.com/earendil-works/pi) coding agent | `pi --mode rpc` (stdin/stdout JSONL) | ✅ implemented |
 | Frontend | Telegram bot (single bound user) | Bot API long polling | ✅ implemented |
 | Backend | Other harnesses (e.g. over HTTP or ACP) | adapter-private | planned |
-| Frontend | Other chat platforms | adapter-private | planned |
+| Frontend | Other chat platforms (polling, WebSocket or webhook) | adapter-private | planned |
 
 ## What it does
 
-- **Routing**: declare frontend and backend instances in config and connect them with rules such as `telegram:* → pi:default`. Multiple backend instances can run side by side, each with its own conversation.
+- **Routing**: declare frontend and backend instances in config and connect them with rules such as `tg:* → pi:default`. Several frontend instances (even two bots of the same platform) and several backend instances can run side by side.
 - **Text, images, voice and files in both directions**: attachments are passed to the agent by path in a shared media directory, never as inline blobs.
 - **Streaming as chat bubbles**: model output is split into separate messages on configurable separators.
 - **Interrupts and priorities**: user messages steer a busy agent; plugin messages queue behind it; `/abort` really stops.
@@ -23,14 +23,15 @@ The architecture is built for **many backends × many frontends**. The first rel
 - **Proactive messages**: an authenticated HTTP injection API lets external processes (schedulers, reminder bots) start a turn.
 - **Agent → user file delivery**: a built-in MCP server gives the agent a `send_file` tool.
 - **Hooks**: in-process plugins can transform or drop inbound/outbound messages and observe events.
+- **Webhook ingress**: frontends that receive platform events over HTTP get a dedicated listener that only starts when used.
 - **Recovery**: the backend process is supervised, its session is persisted and restored, and messages received during recovery are replayed.
 
 ## Architecture
 
 ```
             ┌──────────── frontends ────────────┐
-            │  telegram   (future: …)           │
-            └───────────────┬───────────────────┘
+ webhooks ─▶│  telegram   (future: …)           │
+ (ingress)  └───────────────┬───────────────────┘
                             │ core.Envelope{Parts}
       HTTP inject API ──▶ ┌─┴───────────────────────┐ ◀── hooks / plugins
                           │  router                 │
@@ -46,9 +47,10 @@ The architecture is built for **many backends × many frontends**. The first rel
 Design rules:
 
 - **`internal/core` is the only shared vocabulary.** It defines `Envelope` / `Part` (text, image, audio, file), the `Frontend` and `Backend` interfaces, `Hook`, `MediaStore`, and scheduling intent (`DeliveryStart`, `DeliveryInterrupt`, `DeliveryQueue`).
+- **Addresses are opaque.** A frontend reports and receives bare, adapter-defined addresses (a Telegram chat ID, a Discord channel, a WhatsApp JID…). The router qualifies them as `<instance>:<address>`; the config layer asks the adapter to validate them.
 - **Adapters depend on `core` and nothing else.** Adapters, router and plugins never import one another; a test (`internal/core/architecture_test.go`) enforces this.
 - **Transport is a backend detail.** pi's JSONL wire commands and JSON maps stay private to its adapter. Backend adapters expose typed operations (`Submit`, `Status`, `Models`, `SetModel`, `NewSession`, `Abort`, `Respond`, `Restart`) with typed results.
-- **Composition lives in `cmd/router`.** It loads config, chooses implementations and wires them together.
+- **Composition lives in `cmd/router`.** A registry of adapter types (`cmd/router/frontends.go`) builds configured instances; config, core and router contain no platform knowledge.
 - **Minimal dependencies.** The only third-party Go module is `gopkg.in/yaml.v3`. Telegram, HTTP, JSON-RPC, subprocess management, dotenv parsing and UUIDs use the standard library.
 
 ```
@@ -58,6 +60,7 @@ internal/router/            routing, scheduling queues, priorities, bubble split
 internal/config/            env > .env > YAML > defaults
 internal/media/             confined media store, TTL cleanup
 internal/api/               injection API, /healthz, /status
+internal/ingress/           webhook listener for frontends that need one
 internal/mcp/               MCP server exposing send_file
 adapters/backend/pi/        pi RPC backend
 adapters/frontend/telegram/ Telegram frontend
@@ -119,17 +122,64 @@ export ROUTER_STREAM__SHOW_TOOL_CALLS=true
 export ROUTER_STREAM__SEPARATORS='["\n", "<break />"]'
 export ROUTER_MEDIA__TTL=48h
 export ROUTER_BACKENDS__DEFAULT__COMMAND='["pi", "--mode", "rpc", "--provider", "anthropic"]'
-export ROUTER_ROUTES__0__FROM='telegram:123456789'
+export ROUTER_ROUTES__0__FROM='tg:123456789'
+export ROUTER_FRONTENDS__TG__OPTIONS__TOKEN='123456:bot-token'
 ```
 
 Parent paths apply before child paths. Map keys in environment paths are lowercase. YAML maps merge with default entries; pass a whole-map environment value to replace one completely. Dotenv supports assignments, comment lines, optional `export` and quoted values, but never shell expansion or interpolation. `config.yaml` and `.env` may be absent if the environment supplies all required settings.
 
+### Frontends
+
+Each entry under `frontends` is an instance; its name (lowercase letters, digits, `-`, `_`) is used in routes and environment paths.
+
+```yaml
+frontends:
+  tg:
+    type: telegram
+    owner: "123456789"        # bound user, in the adapter's address format
+    options:                  # adapter-specific, decoded and validated by the adapter
+      token: "123456:bot-token"
+      system_prefix: "𝑴𝒆𝒐𝒘☕︎"
+      system_style: auto
+      voice_max_seconds: 60
+    # ingress:                # webhook-based adapters only
+    #   path: /hooks/tg
+
+lifecycle_notify: [tg]        # owners that receive startup/shutdown notices
+```
+
+- `owner` is required. Adapters use it to authorize the user and as the default destination.
+- `options` are strict like the rest of the config: unknown keys fail startup, and every option can be overridden with `ROUTER_FRONTENDS__<NAME>__OPTIONS__<KEY>`.
+- A whole frontend can be declared from the environment (`ROUTER_FRONTENDS__TG__TYPE`, `…__OWNER`, `…__OPTIONS__TOKEN`).
+
+#### Telegram options
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `token` | required | Bot token from BotFather. |
+| `system_prefix` | `𝑴𝒆𝒐𝒘☕︎` | Decoration for system notices; `""` keeps just `System`. |
+| `system_style` | `auto` | `full` (header, divider, details), `compact` (one `prefix · text` line), or `auto` (compact for single-line notices). |
+| `voice_max_seconds` | `60` | Longest audio sent as a voice message (max 60). |
+
+The owner is a numeric Telegram user ID. Only that user's updates, including callback queries, are accepted. They may also talk from group chats if a route allows it; use an explicit `tg:<chat_id>` route to constrain the destination. Agent replies are never decorated; session fields the backend cannot provide are shown as `Unavailable`.
+
+### Webhook ingress
+
+Frontends whose platform delivers events by HTTP declare `ingress.path`. The router then serves those paths, matched exactly, on a separate listener:
+
+```yaml
+ingress:
+  listen: "0.0.0.0:8443"   # may be public, unlike the API and MCP listeners
+```
+
+The listener starts only if at least one frontend declares a path. Request bodies are capped at 1 MiB; signature verification is the adapter's job. Put TLS in front of it with your usual reverse proxy. A frontend type that does not support webhooks fails startup if given a path.
+
 ### Routes and multiple backends
 
+- Route sources are `<frontend instance>:<address>` or `<frontend instance>:*`; destinations are `<backend type>:<backend name>`.
 - Each backend instance keeps one conversation/session. Declare several pi backends with distinct names and route sources to them independently.
-- Exact routes (`telegram:<chat_id>`) take precedence over wildcards (`telegram:*`). Avoid overlapping routes to the same source if you expect separate conversations.
-- Proactive traffic returns to the backend's last authorized source, or its configured exact route. A wildcard with no prior inbound traffic defaults to the bound user's private chat.
-- Only updates from the configured Telegram user ID are accepted, including callback queries. That user may also talk from group chats if a route allows it; use an explicit `telegram:<chat_id>` route to constrain the destination.
+- Exact routes take precedence over wildcards. Avoid overlapping routes to the same source if you expect separate conversations.
+- Proactive traffic returns to the backend's last authorized source, or its configured exact route. A wildcard with no prior inbound traffic defaults to that frontend's owner.
 
 ### Timestamps
 
@@ -143,16 +193,6 @@ timestamp:
 ```
 
 This yields `[2026-11-21 14:30:00 GMT] Hello`. The prefix is applied once, before queueing and inbound hooks, so `/retry` and reconnects never double it. Router commands, dialog replies and forwarded slash commands are not prefixed; API/plugin injections and outbound messages are not timestamped. Media-only messages get a leading text part. Invalid timezones or empty formats fail startup when enabled.
-
-### Telegram presentation
-
-System notices and dialogs carry a `System` header. `telegram.system_prefix` (default `𝑴𝒆𝒐𝒘☕︎`; `""` keeps just `System`) customizes the decoration, and `telegram.system_style` picks the layout:
-
-- `full`: header, divider, multiline details.
-- `compact`: a single `𝑴𝒆𝒐𝒘☕︎ · text` line.
-- `auto` (default): compact for single-line notices such as tool summaries, full for multiline details.
-
-Agent replies are never decorated. Session fields the backend cannot provide are shown as `Unavailable`.
 
 ## Using it
 
@@ -182,7 +222,7 @@ Select and confirm dialogs become inline buttons; input and editor dialogs use F
 
 ### Output formatting
 
-Text is sent as plain text (no Markdown) so arbitrary model output never triggers Telegram parse errors. Separators are removed even when split across RPC events; empty bubbles are skipped; long bubbles are split at 4096 UTF-16 units. Tool calls are hidden by default. With `stream.show_tool_calls`, only one start and one end summary (name, outcome, duration) is posted per tool. Arguments and results stay available to hooks.
+Text is sent as plain text (no Markdown) so arbitrary model output never triggers Telegram parse errors. Separators are removed even when split across RPC events; empty bubbles are skipped. The router does not split by length; each frontend enforces its platform limit (Telegram splits at 4096 UTF-16 units). Tool calls are hidden by default. With `stream.show_tool_calls`, only one start and one end summary (name, outcome, duration) is posted per tool. Arguments and results stay available to hooks.
 
 ### Attachments
 
@@ -245,13 +285,17 @@ plugins:
     text: "Check whether the user needs a daily reminder."
 ```
 
-## Adding an adapter
+## Adding a frontend
 
-1. Implement `core.Backend` or `core.Frontend` in a new package under `adapters/`, importing only `internal/core`. Keep wire formats and transport inside the package.
-2. Register its factory and config validation in `cmd/router` and `internal/config`.
-3. Leave `internal/core` and `internal/router` unchanged. If a feature seems to need a core change, that is a contract discussion first.
+1. Create a package under `adapters/frontend/` that imports only `internal/core`, and implement `core.Frontend`:
+   - `Run` reports inbound messages with a bare address in `Source`, and the platform message reference in `ReplyRef` if replies can be attached to it.
+   - `Send` enforces platform limits (message length, media types). Outbound envelopes carry the latest inbound `ReplyRef` for the conversation. When platform rules refuse a delivery (a closed messaging window, no unsolicited messages), wrap `core.ErrSendNotAllowed`; the router reports it to hooks as a `send_not_allowed` event and to the caller (for example the agent's `send_file`) instead of treating it as a transport failure.
+   - `Typing` may be a no-op; `Dialog` should degrade (for example to numbered text) when the platform lacks buttons or reply prompts.
+   - Implement `core.IngressFrontend` (`Ingress() http.Handler`) if the platform delivers events by webhook, and verify its signatures there.
+2. Export an options struct with `yaml` tags and defaults (optionally with a `Validate() error` method), and an address validator.
+3. Add one entry to `frontendTypes` in `cmd/router/frontends.go`.
 
-Current composition-layer limits: this build requires exactly one frontend named `telegram`, and the composition root manages pi-specific state (`~/.pi/agent`, `mcp.json` registration). Both are confined to `cmd/router` and `internal/config` and will be generalized as adapters are added.
+`internal/core`, `internal/router` and `internal/config` need no changes.
 
 ## Reliability and limits
 
@@ -261,9 +305,10 @@ Current composition-layer limits: this build requires exactly one frontend named
 - **Deadlines**: interactive backend operations have a 20 s caller deadline. A timeout only ends that wait. It does not kill pi or replay, and a command whose write had started may still execute. A single serialized writer per process keeps JSONL records intact; late responses can never satisfy another request.
 - **Queues**: each backend's recovery queue holds 256 envelopes by default (`queue_limit`) and rejects overflow visibly. Queues are memory-only.
 - **Telegram**: 429 responses honor `retry_after` up to three times; ambiguous network failures are logged rather than retried, to avoid duplicates.
-- **Shutdown**: SIGTERM stops polling and HTTP admission, flushes buffered bubbles, then closes pi's stdin with a bounded wait before killing it. Startup and graceful shutdown send a best-effort notice to the bound user.
+- **Shutdown**: SIGTERM stops polling and HTTP admission, flushes buffered bubbles, then closes pi's stdin with a bounded wait before killing it. Startup and graceful shutdown send a best-effort notice to the owners listed in `lifecycle_notify`.
 - **No durability guarantees**: there is no database, durable outbox or exactly-once delivery. A lost network response means an uncertain delivery result. Slow frontend calls apply backpressure to dispatch.
-- **Non-goals for now**: multi-user Telegram, webhooks, config hot reload, outbound plugin subscriptions, web UI.
+- **Platform rules**: some platforms restrict unsolicited messages (proactive turns, `send_file` outside a conversation). Refusals surface as `send_not_allowed`; the router never retries them.
+- **Non-goals for now**: multiple users per frontend instance, cross-platform identity, config hot reload, outbound plugin subscriptions, web UI.
 
 ## Testing
 
@@ -272,7 +317,7 @@ make test   # go test ./...  (go test -race ./... additionally needs a C compile
 make vet
 ```
 
-The suite covers scheduling with fake frontends/backends, stream boundaries, recovery with a real JSONL child process, Telegram HTTP and dialog flows against a local fake server (opens loopback sockets), auth, MCP delivery, path confinement, config layering and the package dependency rule. No real Telegram or provider credentials are needed. Audio tests use real ffprobe when available and skip otherwise.
+The suite covers scheduling with fake frontends/backends, stream boundaries, recovery with a real JSONL child process, Telegram HTTP and dialog flows against a local fake server (opens loopback sockets), auth, MCP delivery, path confinement, config layering and adapter-typed options, multiple frontend instances, reply references, platform refusals, webhook dispatch, and the package dependency rule. No real Telegram or provider credentials are needed. Audio tests use real ffprobe when available and skip otherwise.
 
 Container smoke test, offline and without credentials:
 

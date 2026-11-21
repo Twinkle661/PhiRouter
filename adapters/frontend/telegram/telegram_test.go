@@ -266,3 +266,27 @@ func TestSystemStyles(t *testing.T) {
 		t.Fatalf("full selection %q", got)
 	}
 }
+
+func TestConfigAndAddresses(t *testing.T) {
+	c := DefaultConfig()
+	if c.Validate() == nil {
+		t.Fatal("missing token accepted")
+	}
+	c.Token = "x"
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	c.SystemStyle = "tiny"
+	if c.Validate() == nil {
+		t.Fatal("unknown system style accepted")
+	}
+	c.SystemStyle, c.VoiceMaxSeconds = SystemStyleAuto, 61
+	if c.Validate() == nil {
+		t.Fatal("voice limit above 60 seconds accepted")
+	}
+	for addr, ok := range map[string]bool{"42": true, "-100123": true, "abc": false, "": false} {
+		if (ValidAddress(addr) == nil) != ok {
+			t.Errorf("address %q: want valid=%v", addr, ok)
+		}
+	}
+}

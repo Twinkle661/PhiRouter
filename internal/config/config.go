@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"reflect"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -33,13 +34,10 @@ type Config struct {
 	Frontends map[string]Frontend `yaml:"frontends"`
 	Backends  map[string]Backend  `yaml:"backends"`
 	Routes    []Route             `yaml:"routes"`
-	Telegram  struct {
-		SystemPrefix string `yaml:"system_prefix"`
-		SystemStyle  string `yaml:"system_style"`
-		Token        string `yaml:"token"`
-		UserID       int64  `yaml:"user_id"`
-	} `yaml:"telegram"`
-	Stream struct {
+	// LifecycleNotify lists frontend instances whose owner receives startup
+	// and shutdown notices.
+	LifecycleNotify []string `yaml:"lifecycle_notify"`
+	Stream          struct {
 		Separators    []string `yaml:"separators"`
 		ShowToolCalls bool     `yaml:"show_tool_calls"`
 	} `yaml:"stream"`
@@ -47,19 +45,74 @@ type Config struct {
 		Dir              string        `yaml:"dir"`
 		InlineImageMaxMB int64         `yaml:"inline_image_max_mb"`
 		TTL              time.Duration `yaml:"ttl"`
-		VoiceMaxSeconds  float64       `yaml:"voice_max_seconds"`
 	} `yaml:"media"`
-	API     Endpoint `yaml:"api"`
-	MCP     Endpoint `yaml:"mcp"`
+	API Endpoint `yaml:"api"`
+	MCP Endpoint `yaml:"mcp"`
+	// Ingress serves webhook endpoints for frontends that declare an
+	// ingress path. It may bind publicly and only starts when used.
+	Ingress struct {
+		Listen string `yaml:"listen"`
+	} `yaml:"ingress"`
 	Prompts struct {
 		Attachment string `yaml:"attachment"`
 	} `yaml:"prompts"`
 	Plugins    []Plugin `yaml:"plugins"`
 	QueueLimit int      `yaml:"queue_limit"`
 }
+
+// Frontend is one frontend instance. Options holds a pointer to the options
+// struct registered for Type; Load decodes it strictly.
 type Frontend struct {
-	Type string `yaml:"type"`
+	Type    string `yaml:"type"`
+	Owner   string `yaml:"owner"`
+	Ingress struct {
+		Path string `yaml:"path"`
+	} `yaml:"ingress"`
+	Options any `yaml:"options"`
+	raw     *yaml.Node
 }
+
+func (f *Frontend) UnmarshalYAML(n *yaml.Node) error {
+	var aux struct {
+		Type    string `yaml:"type"`
+		Owner   string `yaml:"owner"`
+		Ingress struct {
+			Path string `yaml:"path"`
+		} `yaml:"ingress"`
+		Options yaml.Node `yaml:"options"`
+	}
+	if err := strict(n, &aux); err != nil {
+		return err
+	}
+	f.Type, f.Owner, f.Ingress.Path = aux.Type, aux.Owner, aux.Ingress.Path
+	f.Options, f.raw = nil, nil
+	if aux.Options.Kind != 0 {
+		f.raw = &aux.Options
+	}
+	return nil
+}
+
+// FrontendType describes a frontend adapter to the configuration layer
+// without importing it. The composition root supplies a Registry.
+type FrontendType struct {
+	// NewOptions returns a pointer to the adapter's options struct, filled
+	// with defaults. If it has a Validate() error method, Validate calls it.
+	NewOptions func() any
+	// ValidAddress checks a concrete (non-wildcard) address.
+	ValidAddress func(string) error
+}
+type Registry map[string]FrontendType
+
+func strict(n *yaml.Node, out any) error {
+	raw, err := yaml.Marshal(n)
+	if err != nil {
+		return err
+	}
+	d := yaml.NewDecoder(bytes.NewReader(raw))
+	d.KnownFields(true)
+	return d.Decode(out)
+}
+
 type Backend struct {
 	Type        string   `yaml:"type"`
 	Command     []string `yaml:"command"`
@@ -81,23 +134,18 @@ func Defaults() Config {
 	var c Config
 	c.Timestamp.Timezone = "UTC"
 	c.Timestamp.Format = "[2006-01-02 15:04:05 MST] "
-	c.Frontends = map[string]Frontend{"telegram": {Type: "telegram"}}
 	c.Backends = map[string]Backend{"default": {Type: "pi", Command: []string{"pi", "--mode", "rpc"}}}
-	c.Routes = []Route{{"telegram:*", "pi:default"}}
-	c.Telegram.SystemPrefix = "𝑴𝒆𝒐𝒘☕︎"
-	c.Telegram.SystemStyle = "auto"
 	c.Stream.Separators = []string{"\n", "<break />"}
 	c.Media.Dir = "/data/media"
 	c.Media.InlineImageMaxMB = 5
 	c.Media.TTL = 24 * time.Hour
-	c.Media.VoiceMaxSeconds = 60
 	c.API.Listen = "127.0.0.1:8080"
 	c.MCP.Listen = "127.0.0.1:8081"
 	c.Prompts.Attachment = "[attachment: {path} ({mime}, {size})]"
 	c.QueueLimit = 256
 	return c
 }
-func Load(path, dotenv string) (Config, error) {
+func Load(path, dotenv string, reg Registry) (Config, error) {
 	c := Defaults()
 	raw, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
@@ -132,16 +180,26 @@ func Load(path, dotenv string) (Config, error) {
 		}
 		return keys[i] < keys[j]
 	})
-	for _, k := range keys {
-		v := vars[k]
-		if !strings.HasPrefix(k, "ROUTER_") {
-			continue
+	// Frontend options are typed by their frontend's type, which may itself
+	// come from the environment, so they are materialized between two passes.
+	isOptions := func(path []string) bool { return len(path) >= 3 && path[0] == "frontends" && path[2] == "options" }
+	for _, pass := range []bool{false, true} {
+		if pass {
+			if err = c.materialize(reg); err != nil {
+				return c, err
+			}
 		}
-		if err = set(reflect.ValueOf(&c).Elem(), strings.Split(strings.ToLower(strings.TrimPrefix(k, "ROUTER_")), "__"), v); err != nil {
-			return c, fmt.Errorf("%s: %w", k, err)
+		for _, k := range keys {
+			path := strings.Split(strings.ToLower(strings.TrimPrefix(k, "ROUTER_")), "__")
+			if isOptions(path) != pass {
+				continue
+			}
+			if err = set(reflect.ValueOf(&c).Elem(), path, vars[k]); err != nil {
+				return c, fmt.Errorf("%s: %w", k, err)
+			}
 		}
 	}
-	if err = c.Validate(); err != nil {
+	if err = c.Validate(reg); err != nil {
 		return c, err
 	}
 	if c.Timestamp.Enabled {
@@ -149,6 +207,28 @@ func Load(path, dotenv string) (Config, error) {
 		c.Timestamp.Location, _ = time.LoadLocation(c.Timestamp.Timezone)
 	}
 	return c, nil
+}
+
+// materialize decodes each frontend's options into its registered type.
+func (c *Config) materialize(reg Registry) error {
+	for name, f := range c.Frontends {
+		if f.Options != nil {
+			continue
+		}
+		t, ok := reg[f.Type]
+		if !ok {
+			return fmt.Errorf("frontend %s: unknown type %q", name, f.Type)
+		}
+		f.Options = t.NewOptions()
+		if f.raw != nil {
+			if err := strict(f.raw, f.Options); err != nil {
+				return fmt.Errorf("frontend %s options: %w", name, err)
+			}
+			f.raw = nil
+		}
+		c.Frontends[name] = f
+	}
+	return nil
 }
 func readEnv(path string) (map[string]string, error) {
 	out := map[string]string{}
@@ -187,6 +267,10 @@ func readEnv(path string) (map[string]string, error) {
 	return out, s.Err()
 }
 func set(v reflect.Value, path []string, raw string) error {
+	// Materialized options: descend into the concrete struct.
+	if v.Kind() == reflect.Interface && !v.IsNil() && v.Elem().Kind() == reflect.Pointer {
+		return set(v.Elem().Elem(), path, raw)
+	}
 	if len(path) == 0 {
 		if v.Kind() == reflect.String {
 			v.SetString(raw)
@@ -229,7 +313,11 @@ func set(v reflect.Value, path []string, raw string) error {
 	}
 	return fmt.Errorf("unknown configuration field %s", strings.Join(path, "."))
 }
-func (c Config) Validate() error {
+
+var instanceName = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
+var ingressPath = regexp.MustCompile(`^(/[A-Za-z0-9._~-]+)+$`)
+
+func (c Config) Validate(reg Registry) error {
 	if c.Timestamp.Enabled {
 		if strings.TrimSpace(c.Timestamp.Timezone) == "" || strings.TrimSpace(c.Timestamp.Format) == "" {
 			return fmt.Errorf("timestamp.timezone and timestamp.format must not be empty when enabled")
@@ -237,14 +325,6 @@ func (c Config) Validate() error {
 		if _, err := time.LoadLocation(c.Timestamp.Timezone); err != nil {
 			return fmt.Errorf("invalid timestamp.timezone: %w", err)
 		}
-	}
-	if c.Telegram.Token == "" || c.Telegram.UserID <= 0 {
-		return fmt.Errorf("telegram.token and positive telegram.user_id are required")
-	}
-	switch c.Telegram.SystemStyle {
-	case "full", "compact", "auto":
-	default:
-		return fmt.Errorf("telegram.system_style must be full, compact or auto")
 	}
 	if c.API.Token == "" || c.MCP.Token == "" || c.API.Token == c.MCP.Token {
 		return fmt.Errorf("api.token and mcp.token must be nonempty and different")
@@ -269,7 +349,16 @@ func (c Config) Validate() error {
 	if c.API.Listen == c.MCP.Listen {
 		return fmt.Errorf("API and MCP listeners must differ")
 	}
-	if c.Media.Dir == "" || c.Media.TTL <= 0 || c.Media.InlineImageMaxMB < 0 || c.Media.InlineImageMaxMB > 5 || c.Media.VoiceMaxSeconds <= 0 || c.Media.VoiceMaxSeconds > 60 || c.QueueLimit < 1 {
+	if c.Ingress.Listen != "" {
+		_, p, err := net.SplitHostPort(c.Ingress.Listen)
+		if port, e := strconv.Atoi(p); err != nil || e != nil || port < 1 || port > 65535 {
+			return fmt.Errorf("invalid ingress.listen")
+		}
+		if c.Ingress.Listen == c.API.Listen || c.Ingress.Listen == c.MCP.Listen {
+			return fmt.Errorf("ingress listener must differ from API and MCP")
+		}
+	}
+	if c.Media.Dir == "" || c.Media.TTL <= 0 || c.Media.InlineImageMaxMB < 0 || c.Media.InlineImageMaxMB > 5 || c.QueueLimit < 1 {
 		return fmt.Errorf("invalid media or queue limits")
 	}
 	for _, s := range c.Stream.Separators {
@@ -277,8 +366,48 @@ func (c Config) Validate() error {
 			return fmt.Errorf("stream separators must not be empty")
 		}
 	}
-	if len(c.Frontends) != 1 || c.Frontends["telegram"].Type != "telegram" {
-		return fmt.Errorf("this build requires one frontend named telegram of type telegram")
+	if len(c.Frontends) == 0 {
+		return fmt.Errorf("at least one frontend is required")
+	}
+	paths := map[string]string{}
+	for name, f := range c.Frontends {
+		if !instanceName.MatchString(name) {
+			return fmt.Errorf("frontend name %q must use lowercase letters, digits, - or _", name)
+		}
+		t, ok := reg[f.Type]
+		if !ok {
+			return fmt.Errorf("frontend %s: unknown type %q", name, f.Type)
+		}
+		if f.Owner == "" {
+			return fmt.Errorf("frontend %s: owner is required", name)
+		}
+		if err := t.ValidAddress(f.Owner); err != nil {
+			return fmt.Errorf("frontend %s owner: %w", name, err)
+		}
+		if v, ok := f.Options.(interface{ Validate() error }); ok {
+			if err := v.Validate(); err != nil {
+				return fmt.Errorf("frontend %s options: %w", name, err)
+			}
+		}
+		if p := f.Ingress.Path; p != "" {
+			if !ingressPath.MatchString(p) {
+				return fmt.Errorf("frontend %s: invalid ingress path %q", name, p)
+			}
+			if other, dup := paths[p]; dup {
+				return fmt.Errorf("frontends %s and %s share ingress path %s", other, name, p)
+			}
+			paths[p] = name
+			if c.Ingress.Listen == "" {
+				return fmt.Errorf("frontend %s uses ingress but ingress.listen is empty", name)
+			}
+		}
+	}
+	notify := map[string]bool{}
+	for _, name := range c.LifecycleNotify {
+		if _, ok := c.Frontends[name]; !ok || notify[name] {
+			return fmt.Errorf("lifecycle_notify: unknown or duplicate frontend %q", name)
+		}
+		notify[name] = true
 	}
 	if len(c.Backends) == 0 || len(c.Routes) == 0 {
 		return fmt.Errorf("backends and routes are required")
@@ -295,13 +424,14 @@ func (c Config) Validate() error {
 		if !ok || !exists || kind != b.Type {
 			return fmt.Errorf("unknown route destination %s", r.To)
 		}
-		f, chat, ok := strings.Cut(r.From, ":")
-		if !ok || f != "telegram" || chat == "" {
+		name, address, ok := strings.Cut(r.From, ":")
+		front, exists := c.Frontends[name]
+		if !ok || !exists || address == "" {
 			return fmt.Errorf("invalid route source %s", r.From)
 		}
-		if chat != "*" {
-			if _, err := strconv.ParseInt(chat, 10, 64); err != nil {
-				return fmt.Errorf("invalid chat ID in route")
+		if address != "*" {
+			if err := reg[front.Type].ValidAddress(address); err != nil {
+				return fmt.Errorf("route source %s: %w", r.From, err)
 			}
 		}
 		if seen[r.From] {

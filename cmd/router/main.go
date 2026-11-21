@@ -6,10 +6,10 @@ import (
 	"flag"
 	"fmt"
 	"github.com/Twinkle661/PhiRouter/adapters/backend/pi"
-	"github.com/Twinkle661/PhiRouter/adapters/frontend/telegram"
 	"github.com/Twinkle661/PhiRouter/internal/api"
 	"github.com/Twinkle661/PhiRouter/internal/config"
 	"github.com/Twinkle661/PhiRouter/internal/core"
+	"github.com/Twinkle661/PhiRouter/internal/ingress"
 	"github.com/Twinkle661/PhiRouter/internal/mcp"
 	"github.com/Twinkle661/PhiRouter/internal/media"
 	"github.com/Twinkle661/PhiRouter/internal/router"
@@ -20,7 +20,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -51,7 +50,7 @@ func run() error {
 		}
 		return nil
 	}
-	c, err := config.Load(*path, *dotenv)
+	c, err := config.Load(*path, *dotenv, frontendRegistry())
 	if err != nil {
 		return err
 	}
@@ -84,7 +83,10 @@ func run() error {
 	if err = registerMCP(filepath.Join(agentDir, "mcp.json"), "http://"+c.MCP.Listen+"/mcp"); err != nil {
 		return err
 	}
-	tg := telegram.New(telegram.Options{SystemPrefix: c.Telegram.SystemPrefix, SystemStyle: c.Telegram.SystemStyle, Token: c.Telegram.Token, UserID: c.Telegram.UserID, Media: store, VoiceMaxSeconds: c.Media.VoiceMaxSeconds})
+	frontends, owners, webhooks, err := buildFrontends(c, store)
+	if err != nil {
+		return err
+	}
 	var hooks []core.Hook
 	for _, p := range c.Plugins {
 		if p.Type == "prefix" {
@@ -96,7 +98,7 @@ func run() error {
 		routes = append(routes, router.Route{From: r.From, To: r.To})
 	}
 	timestamp := router.TimestampOptions{Enabled: c.Timestamp.Enabled, Location: c.Timestamp.Location, Format: c.Timestamp.Format}
-	rt := router.New(router.Options{Timestamp: timestamp, Routes: routes, DefaultSource: "telegram:" + strconv.FormatInt(c.Telegram.UserID, 10), Separators: c.Stream.Separators, ShowTools: c.Stream.ShowToolCalls, QueueLimit: c.QueueLimit, Hooks: hooks}, map[string]core.Frontend{"telegram": tg}, backends)
+	rt := router.New(router.Options{Timestamp: timestamp, Routes: routes, Owners: owners, Separators: c.Stream.Separators, ShowTools: c.Stream.ShowToolCalls, QueueLimit: c.QueueLimit, Hooks: hooks}, frontends, backends)
 	apiListener, err := net.Listen("tcp", c.API.Listen)
 	if err != nil {
 		return err
@@ -112,6 +114,23 @@ func run() error {
 		mcpRoutes[key] = true
 	}
 	servers := []*http.Server{{Handler: api.New(c.API.Token, store.Validate, rt.Inject), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 90 * time.Second}, {Handler: mcp.New(mcp.Options{Token: c.MCP.Token, Routes: mcpRoutes, Media: store, Send: rt.Send}), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 90 * time.Second}}
+	listeners := []net.Listener{apiListener, mcpListener}
+	// The ingress listener only exists when some frontend declares a webhook path.
+	if len(webhooks) > 0 {
+		handlers := map[string]http.Handler{}
+		for p, f := range webhooks {
+			handlers[p] = f.Ingress()
+		}
+		ingressListener, err := net.Listen("tcp", c.Ingress.Listen)
+		if err != nil {
+			return err
+		}
+		defer ingressListener.Close()
+		listeners = append(listeners, ingressListener)
+		servers = append(servers, &http.Server{Handler: ingress.New(handlers), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second})
+	} else if c.Ingress.Listen != "" {
+		slog.Warn("ingress.listen is set but no frontend declares an ingress path; not listening")
+	}
 	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	workerCtx, cancelWorkers := context.WithCancel(context.Background())
@@ -134,14 +153,21 @@ func run() error {
 			}
 		}()
 	}
-	notifyLifecycle(tg, c.Telegram.UserID, "Server started ₍^ >ヮ<^₎ .ᐟ.ᐟ\n\nPhiRouter is online. Backends are connecting; messages will queue until ready.")
+	lifecycle := func(text string) {
+		for _, name := range c.LifecycleNotify {
+			notifyLifecycle(frontends[name], owners[name], text)
+		}
+	}
+	lifecycle("Server started ₍^ >ヮ<^₎ .ᐟ.ᐟ\n\nPhiRouter is online. Backends are connecting; messages will queue until ready.")
 	routerDone := make(chan struct{})
 	go func() { defer close(routerDone); _ = rt.Run(routerCtx) }()
 	for key, b := range backends {
 		launch(func() error { return b.Run(backendCtx, func(e core.Event) { rt.Event(backendCtx, key, e) }) })
 	}
-	launch(func() error { return tg.Run(workerCtx, rt.Inbound) })
-	for i, listener := range []net.Listener{apiListener, mcpListener} {
+	for name, f := range frontends {
+		launch(func() error { return f.Run(workerCtx, rt.Receiver(name)) })
+	}
+	for i, listener := range listeners {
 		server := servers[i]
 		launch(func() error {
 			err := server.Serve(listener)
@@ -170,12 +196,12 @@ func run() error {
 			}
 		}
 	})
-	slog.Info("router started", "api", c.API.Listen, "mcp", c.MCP.Listen)
+	slog.Info("router started", "api", c.API.Listen, "mcp", c.MCP.Listen, "frontends", len(frontends), "webhooks", len(webhooks))
 	select {
 	case <-sigCtx.Done():
 	case err = <-errs:
 	}
-	notifyLifecycle(tg, c.Telegram.UserID, "Server shutting down ᗜ⩊ᗜ\n\nPhiRouter is going offline. You can send messages again after it restarts.")
+	lifecycle("Server shutting down ᗜ⩊ᗜ\n\nPhiRouter is going offline. You can send messages again after it restarts.")
 	cancelWorkers()
 	shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -223,10 +249,10 @@ func registerMCP(path, endpoint string) error {
 	return os.Rename(tmp, path)
 }
 
-func notifyLifecycle(f core.Frontend, userID int64, text string) {
+func notifyLifecycle(f core.Frontend, address, text string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := f.Send(ctx, strconv.FormatInt(userID, 10), core.Envelope{System: true, Parts: []core.Part{{Type: core.PartText, Text: text}}}); err != nil {
+	if err := f.Send(ctx, address, core.Envelope{System: true, Parts: []core.Part{{Type: core.PartText, Text: text}}}); err != nil {
 		slog.Error("lifecycle notification failed", "error", err)
 	}
 }

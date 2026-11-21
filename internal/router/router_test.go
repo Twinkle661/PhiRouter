@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"errors"
+	"fmt"
 	"github.com/Twinkle661/PhiRouter/internal/core"
 	"strings"
 	"sync"
@@ -10,19 +11,30 @@ import (
 	"time"
 )
 
+var fakeRoutes = []Route{{"fake:*", "test:default"}}
+var fakeOwners = map[string]string{"fake": "1"}
+
 type fakeFrontend struct {
-	mu      sync.Mutex
-	texts   []string
-	dialogs []core.Dialog
+	mu        sync.Mutex
+	texts     []string
+	dialogs   []core.Dialog
+	addresses []string
+	refs      []string
+	refuse    bool
 }
 
 func (f *fakeFrontend) Run(ctx context.Context, _ func(context.Context, core.Envelope) error) error {
 	<-ctx.Done()
 	return nil
 }
-func (f *fakeFrontend) Send(_ context.Context, _ string, e core.Envelope) error {
+func (f *fakeFrontend) Send(_ context.Context, address string, e core.Envelope) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.refuse {
+		return fmt.Errorf("window closed: %w", core.ErrSendNotAllowed)
+	}
+	f.addresses = append(f.addresses, address)
+	f.refs = append(f.refs, e.ReplyRef)
 	for _, p := range e.Parts {
 		f.texts = append(f.texts, p.Text)
 	}
@@ -77,7 +89,7 @@ func setup(t *testing.T) (*Router, *fakeFrontend, *fakeBackend, context.Context)
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	f, b := &fakeFrontend{}, &fakeBackend{}
-	r := New(Options{Routes: []Route{{"fake:*", "test:default"}}, DefaultSource: "fake:1", Separators: []string{"\n", "<break />"}, QueueLimit: 4}, map[string]core.Frontend{"fake": f}, map[string]core.Backend{"test:default": b})
+	r := New(Options{Routes: fakeRoutes, Owners: fakeOwners, Separators: []string{"\n", "<break />"}, QueueLimit: 4}, map[string]core.Frontend{"fake": f}, map[string]core.Backend{"test:default": b})
 	go r.Run(ctx)
 	t.Cleanup(func() { cancel(); <-r.done })
 	return r, f, b, ctx
@@ -216,7 +228,7 @@ func TestUnknownSlashPreservesChannelPriorityWhenBusy(t *testing.T) {
 func TestGracefulShutdownActuallyFlushes(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	f, b := &fakeFrontend{}, &fakeBackend{}
-	r := New(Options{DefaultSource: "fake:1"}, map[string]core.Frontend{"fake": f}, map[string]core.Backend{"test:default": b})
+	r := New(Options{Routes: fakeRoutes, Owners: fakeOwners}, map[string]core.Frontend{"fake": f}, map[string]core.Backend{"test:default": b})
 	go r.Run(ctx)
 	r.Event(ctx, "test:default", core.Event{Type: "message_update", Text: "unfinished bubble"})
 	// A status request is a barrier after the queued event is observed.
@@ -233,7 +245,7 @@ func TestGracefulShutdownActuallyFlushes(t *testing.T) {
 func TestToolOutputSummarizesOnlyStartAndEnd(t *testing.T) {
 	for _, show := range []bool{false, true} {
 		f, b := &fakeFrontend{}, &fakeBackend{}
-		r := New(Options{DefaultSource: "fake:1", ShowTools: show}, map[string]core.Frontend{"fake": f}, map[string]core.Backend{"test:default": b})
+		r := New(Options{Routes: fakeRoutes, Owners: fakeOwners, ShowTools: show}, map[string]core.Frontend{"fake": f}, map[string]core.Backend{"test:default": b})
 		events := []core.Event{{Type: "tool_execution_start", Data: []byte(`{"secret":"argument"}`), Tool: &core.ToolEvent{Name: "bash", Phase: core.ToolStarted}}}
 		for i := 0; i < 100; i++ {
 			events = append(events, core.Event{Type: "tool_execution_update", Data: []byte(`{"partialResult":"large secret output"}`)})
@@ -256,7 +268,7 @@ func TestToolOutputSummarizesOnlyStartAndEnd(t *testing.T) {
 
 func TestSessionCommandsShowDetails(t *testing.T) {
 	f, b := &fakeFrontend{}, &fakeBackend{}
-	r := New(Options{DefaultSource: "fake:1"}, map[string]core.Frontend{"fake": f}, map[string]core.Backend{"test:default": b})
+	r := New(Options{Routes: fakeRoutes, Owners: fakeOwners}, map[string]core.Frontend{"fake": f}, map[string]core.Backend{"test:default": b})
 	s := r.states["test:default"]
 	s.ready = true
 	for _, command := range []string{"/new session", "/status"} {

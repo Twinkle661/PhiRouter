@@ -6,9 +6,21 @@ timestamp:
   timezone: "UTC" # e.g. Europe/London or Asia/Shanghai
   format: "[2006-01-02 15:04:05 MST] "
 
+# Frontend instances. The name ("tg") is used in routes and environment
+# overrides; owner is the bound user in the adapter's address format.
 frontends:
-  telegram:
+  tg:
     type: telegram
+    # owner: "123456789"   # usually set via ROUTER_FRONTENDS__TG__OWNER
+    options:               # token via ROUTER_FRONTENDS__TG__OPTIONS__TOKEN
+      system_prefix: "𝑴𝒆𝒐𝒘☕︎" # Set to "" to keep only the System label.
+      system_style: auto      # full | compact | auto (one-line header for single-line notices)
+      voice_max_seconds: 60
+    # ingress:             # only for webhook-based adapters (Telegram uses polling)
+    #   path: /hooks/tg
+
+# Frontends whose owner receives startup/shutdown notices.
+lifecycle_notify: [tg]
 
 backends:
   default:
@@ -17,12 +29,8 @@ backends:
     # session_file: /home/node/.pi/agent/sessions/example.jsonl
 
 routes:
-  - from: "telegram:*"
+  - from: "tg:*"
     to: "pi:default"
-
-telegram:
-  system_prefix: "𝑴𝒆𝒐𝒘☕︎" # Set to "" to keep only the System label.
-  system_style: auto # full | compact | auto (one-line header for single-line notices)
 
 stream:
   separators: ["\n", "<break />"]
@@ -32,12 +40,14 @@ media:
   dir: /data/media
   inline_image_max_mb: 5
   ttl: 24h
-  voice_max_seconds: 60
 
 api:
   listen: "127.0.0.1:8080"
 mcp:
   listen: "127.0.0.1:8081"
+# Public webhook listener; started only if a frontend declares ingress.path.
+# ingress:
+#   listen: "0.0.0.0:8443"
 
 prompts:
   attachment: "[attachment: {path} ({mime}, {size})]"

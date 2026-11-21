@@ -25,6 +25,41 @@ import (
 
 const downloadLimit int64 = 20 * 1024 * 1024
 
+// Config is this adapter's `options` block in the router configuration.
+type Config struct {
+	Token           string  `yaml:"token"`
+	SystemPrefix    string  `yaml:"system_prefix"`
+	SystemStyle     string  `yaml:"system_style"`
+	VoiceMaxSeconds float64 `yaml:"voice_max_seconds"`
+}
+
+// DefaultConfig returns the options used when the configuration omits them.
+func DefaultConfig() *Config {
+	return &Config{SystemPrefix: "𝑴𝒆𝒐𝒘☕︎", SystemStyle: SystemStyleAuto, VoiceMaxSeconds: 60}
+}
+func (c *Config) Validate() error {
+	if c.Token == "" {
+		return errors.New("token is required")
+	}
+	switch c.SystemStyle {
+	case SystemStyleFull, SystemStyleCompact, SystemStyleAuto:
+	default:
+		return errors.New("system_style must be full, compact or auto")
+	}
+	if c.VoiceMaxSeconds <= 0 || c.VoiceMaxSeconds > 60 {
+		return errors.New("voice_max_seconds must be in (0, 60]")
+	}
+	return nil
+}
+
+// ValidAddress accepts numeric Telegram user and chat IDs.
+func ValidAddress(address string) error {
+	if _, err := strconv.ParseInt(address, 10, 64); err != nil {
+		return errors.New("Telegram addresses are numeric chat or user IDs")
+	}
+	return nil
+}
+
 type Options struct {
 	SystemPrefix    string
 	SystemStyle     string
@@ -206,7 +241,7 @@ func (f *Frontend) handle(ctx context.Context, u update, receive func(context.Co
 		if !ok {
 			return nil
 		}
-		if err := receive(ctx, core.Envelope{Source: "telegram:" + strconv.FormatInt(a.chat, 10), Reply: &a.reply}); err != nil {
+		if err := receive(ctx, core.Envelope{Source: strconv.FormatInt(a.chat, 10), Reply: &a.reply}); err != nil {
 			return err
 		}
 		f.clear(a.reply.ID, a.chat)
@@ -220,7 +255,7 @@ func (f *Frontend) handle(ctx context.Context, u update, receive func(context.Co
 		slog.Debug("ignored unauthorized Telegram message")
 		return nil
 	}
-	source := "telegram:" + strconv.FormatInt(m.Chat.ID, 10)
+	source := strconv.FormatInt(m.Chat.ID, 10)
 	if m.Reply != nil {
 		f.mu.Lock()
 		a, ok := f.replies[m.Reply.ID]
@@ -234,7 +269,7 @@ func (f *Frontend) handle(ctx context.Context, u update, receive func(context.Co
 			return f.selected(ctx, a)
 		}
 	}
-	e := core.Envelope{Source: source}
+	e := core.Envelope{Source: source, ReplyRef: strconv.FormatInt(m.ID, 10)}
 	if m.Date > 0 {
 		e.Time = time.Unix(m.Date, 0)
 	}
