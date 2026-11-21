@@ -1,9 +1,9 @@
 package api
 
 import (
-	"PhiRouter/internal/core"
-	"PhiRouter/internal/media"
 	"context"
+	"github.com/Twinkle661/PhiRouter/internal/core"
+	"github.com/Twinkle661/PhiRouter/internal/media"
 	"net/http/httptest"
 	"strings"
 	"testing"

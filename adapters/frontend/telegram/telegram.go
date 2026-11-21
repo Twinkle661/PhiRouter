@@ -2,7 +2,6 @@
 package telegram
 
 import (
-	"PhiRouter/internal/core"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -10,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Twinkle661/PhiRouter/internal/core"
 	"io"
 	"log/slog"
 	"mime/multipart"

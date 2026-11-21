@@ -2,13 +2,13 @@
 package pi
 
 import (
-	"PhiRouter/internal/core"
 	"bufio"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Twinkle661/PhiRouter/internal/core"
 	"io"
 	"log/slog"
 	"os"

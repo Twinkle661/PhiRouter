@@ -26,7 +26,7 @@ func TestDependencyDirection(t *testing.T) {
 			}
 			for _, imp := range file.Imports {
 				name, _ := strconv.Unquote(imp.Path.Value)
-				if strings.HasPrefix(name, "PhiRouter/") && name != "PhiRouter/internal/core" {
+				if strings.HasPrefix(name, "github.com/Twinkle661/PhiRouter/") && name != "github.com/Twinkle661/PhiRouter/internal/core" {
 					t.Errorf("%s imports %s", path, name)
 				}
 			}

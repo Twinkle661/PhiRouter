@@ -1,11 +1,11 @@
 package telegram
 
 import (
-	"PhiRouter/internal/core"
-	"PhiRouter/internal/media"
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/Twinkle661/PhiRouter/internal/core"
+	"github.com/Twinkle661/PhiRouter/internal/media"
 	"net/http"
 	"net/http/httptest"
 	"os/exec"

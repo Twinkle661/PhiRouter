@@ -1,10 +1,10 @@
 package media
 
 import (
-	"PhiRouter/internal/core"
 	"context"
 	"crypto/rand"
 	"fmt"
+	"github.com/Twinkle661/PhiRouter/internal/core"
 	"io"
 	"io/fs"
 	"mime"

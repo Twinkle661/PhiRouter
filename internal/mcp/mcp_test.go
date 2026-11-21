@@ -1,10 +1,10 @@
 package mcp
 
 import (
-	"PhiRouter/internal/core"
-	"PhiRouter/internal/media"
 	"context"
 	"encoding/json"
+	"github.com/Twinkle661/PhiRouter/internal/core"
+	"github.com/Twinkle661/PhiRouter/internal/media"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
