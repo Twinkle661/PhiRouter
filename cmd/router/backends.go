@@ -37,7 +37,7 @@ var backendTypes = map[string]backendType{
 			if !ok {
 				return nil, fmt.Errorf("pi options missing")
 			}
-			return pi.FromConfig(env.Name, o, env.Tools, env.Media)
+			return pi.FromConfig(o, env.StateDir, env.Tools, env.Media)
 		},
 	},
 	"acp": {

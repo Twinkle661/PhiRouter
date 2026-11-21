@@ -60,10 +60,11 @@ func (c *Config) ResolveAgentDir() (string, error) {
 	return filepath.Join(home, ".pi", "agent"), nil
 }
 
-// FromConfig builds a backend for instance name. It registers the router's
-// tool server in the agent directory's mcp.json (read by pi-mcp-adapter);
-// the token reaches pi through the environment, never the file.
-func FromConfig(name string, c *Config, tools core.ToolServer, media core.MediaStore) (*Backend, error) {
+// FromConfig builds a backend whose session pointer lives in stateDir. It
+// registers the router's tool server in the agent directory's mcp.json (read
+// by pi-mcp-adapter); the token reaches pi through the environment, never
+// the file.
+func FromConfig(c *Config, stateDir string, tools core.ToolServer, media core.MediaStore) (*Backend, error) {
 	dir, err := c.ResolveAgentDir()
 	if err != nil {
 		return nil, err
@@ -78,7 +79,7 @@ func FromConfig(name string, c *Config, tools core.ToolServer, media core.MediaS
 	if c.AgentDir != "" {
 		env = append(env, "PI_CODING_AGENT_DIR="+c.AgentDir)
 	}
-	return New(Options{Command: c.Command, Env: env, StatePath: filepath.Join(dir, "phirouter-"+name+".session"), SessionFile: c.SessionFile, Attachment: c.Attachment, InlineMax: c.InlineImageMaxMB * 1024 * 1024, Media: media}), nil
+	return New(Options{Command: c.Command, Env: env, StatePath: filepath.Join(stateDir, "session"), SessionFile: c.SessionFile, Attachment: c.Attachment, InlineMax: c.InlineImageMaxMB * 1024 * 1024, Media: media}), nil
 }
 
 // RegisterMCP adds the phirouter entry to an mcp.json, keeping other entries.

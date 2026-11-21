@@ -389,14 +389,14 @@ func TestMCPRegistrationPreservesEntries(t *testing.T) {
 }
 
 func TestFromConfigUsesAgentDir(t *testing.T) {
-	dir := t.TempDir()
+	dir, state := t.TempDir(), t.TempDir()
 	c := DefaultConfig()
 	c.AgentDir = dir
-	b, err := FromConfig("zero", c, core.ToolServer{URL: "http://127.0.0.1:8081/mcp", Token: "secret", Route: "zero"}, nil)
+	b, err := FromConfig(c, state, core.ToolServer{URL: "http://127.0.0.1:8081/mcp", Token: "secret", Route: "zero"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b.opt.StatePath != filepath.Join(dir, "phirouter-zero.session") || b.opt.InlineMax != 5*1024*1024 {
+	if b.opt.StatePath != filepath.Join(state, "session") || b.opt.InlineMax != 5*1024*1024 {
 		t.Fatalf("options: %+v", b.opt)
 	}
 	env := strings.Join(b.opt.Env, " ")

@@ -63,7 +63,8 @@ media:
   dir: /data/media
   ttl: 24h
 
-# Per-backend state, in <dir>/<backend name> (e.g. an ACP session ID).
+# Per-backend state, in <dir>/<backend name> (pi's session pointer, an ACP
+# session ID).
 state:
   dir: /data/state
 

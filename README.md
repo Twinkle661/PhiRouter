@@ -95,7 +95,7 @@ Open a private chat with your bot and send a message. Telegram requires you to c
 Deployment notes:
 
 - Router and pi run in **one container** as the non-root `node` user; the router spawns pi as a child process. Config is mounted read-only.
-- The pi login, session pointer, extensions and `mcp.json` live in the `pi-agent` volume; files live in the `media` volume; other backends keep their state (such as an ACP session ID) in the `state` volume under `state.dir/<backend name>`.
+- The pi login, sessions, extensions and `mcp.json` live in the `pi-agent` volume; files live in the `media` volume; each backend's router-side state (pi's session pointer, an ACP session ID) lives in the `state` volume under `state.dir/<backend name>`.
 - The injection API is reachable by sibling containers at `http://router:8080` but is **not published to the host**. To reach it from the host, add a loopback-only mapping (`127.0.0.1:8080:8080`). Never publish it on a public interface. MCP stays bound to `127.0.0.1:8081` inside the container.
 - To use provider API keys instead of interactive login, add the provider's variable (e.g. `ANTHROPIC_API_KEY`) to `.env`; Compose passes it to pi.
 - The image pins **pi 1.6.0** on the Node 22 line (pi needs Node ≥ 22.19) and builds with Go 1.26. Upgrading pi means re-checking its RPC contract and running the tests.
@@ -411,7 +411,7 @@ plugins:
 ## Reliability and limits
 
 - **Supervision**: backend process exits trigger exponential restart backoff (1–60 s, reset after a minute of stable runtime).
-- **Sessions**: pi's active session pointer is captured on startup, agent start/settle, `/new` and `/restart`, then atomically persisted per backend. A failed pi restore is surfaced and retried, never silently replaced with a new conversation; an explicit `session_file` overrides the pointer. ACP sessions are resumed with `session/load`; if the agent cannot load it, a new session starts and the failure is logged.
+- **Sessions**: pi's active session pointer is captured on startup, agent start/settle, `/new` and `/restart`, then atomically persisted to `state.dir/<name>/session`. A failed pi restore is surfaced and retried, never silently replaced with a new conversation; an explicit `session_file` overrides the pointer. ACP sessions are resumed with `session/load`; if the agent cannot load it, a new session starts and the failure is logged.
 - **Replay**: messages received during recovery are replayed FIFO within user/plugin priority. Work a backend already accepted is **not** replayed after a crash, because tools may already have run; use `/retry` deliberately.
 - **Deadlines**: interactive backend operations have a 20 s caller deadline. A timeout only ends that wait. It does not kill the backend or replay, and a command whose write had started may still execute. A single serialized writer per process keeps line-delimited records intact; late responses can never satisfy another request.
 - **Queues**: each backend's recovery queue holds 256 envelopes by default (`queue_limit`) and rejects overflow visibly. Queues are memory-only.
