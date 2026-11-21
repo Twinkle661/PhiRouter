@@ -143,7 +143,7 @@ func TestFrontendValidation(t *testing.T) {
 			t.Errorf("ingress path %q accepted", bad)
 		}
 	}
-	path, dotenv = write(t, strings.Replace(ok, "0.0.0.0:8443", "127.0.0.1:8080", 1))
+	path, dotenv = write(t, strings.Replace(ok, "0.0.0.0:8443", "127.0.0.1:3710", 1))
 	if _, err := Load(path, dotenv, regs); err == nil {
 		t.Error("ingress sharing the API listener accepted")
 	}

@@ -19,8 +19,8 @@ COPY --chown=node:node config.example.yaml /app/router/config.yaml
 ENV HOME=/home/node
 USER node
 WORKDIR /app/router
-EXPOSE 8080
+EXPOSE 3710
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD ["router", "-healthcheck", "http://127.0.0.1:8080/healthz"]
+    CMD ["router", "-healthcheck", "http://127.0.0.1:3710/healthz"]
 ENTRYPOINT ["router"]
 CMD ["-config", "/app/router/config.yaml"]
