@@ -120,7 +120,7 @@ See [`config.example.yaml`](config.example.yaml) for every section. Precedence i
 Every field can be overridden with a double-underscore path. Arrays and maps accept YAML/JSON values, and existing array elements can be addressed by index:
 
 ```sh
-export ROUTER_STREAM__SHOW_TOOL_CALLS=true
+export ROUTER_STREAM__SHOW_TOOL_CALLS__ENABLED=true
 export ROUTER_STREAM__SEPARATORS='["\n", "<break />"]'
 export ROUTER_MEDIA__TTL=48h
 export ROUTER_BACKENDS__DEFAULT__COMMAND='["pi", "--mode", "rpc", "--provider", "anthropic"]'
@@ -224,7 +224,7 @@ Select and confirm dialogs become inline buttons; input and editor dialogs use F
 
 ### Output formatting
 
-Text is sent as plain text (no Markdown) so arbitrary model output never triggers Telegram parse errors. Separators are removed even when split across RPC events; empty bubbles are skipped. The router does not split by length; each frontend enforces its platform limit (Telegram splits at 4096 UTF-16 units). Tool calls are hidden by default. With `stream.show_tool_calls`, only one start and one end summary (name, outcome, duration) is posted per tool. Arguments and results stay available to hooks.
+Text is sent as plain text (no Markdown) so arbitrary model output never triggers Telegram parse errors. Separators are removed even when split across RPC events; empty bubbles are skipped. The router does not split by length; each frontend enforces its platform limit (Telegram splits at 4096 UTF-16 units). Tool calls are hidden by default. With `stream.show_tool_calls.enabled`, one notice is posted when each tool starts and one more only if it fails (with its duration); successful completions are silent, since the agent's reply marks the end. With `detailed` (the default), start notices also show a one-line argument summary, such as `Tool started: bash · git status`: the command, pattern, path, URL or query of pi's built-in tools, otherwise the compact JSON arguments, clipped to `max_detail_length` runes (default 120). Details travel through the chat platform, so set `detailed: false` if arguments may hold secrets. Results are never posted; full events stay available to hooks. The older `show_tool_calls: true` form still works.
 
 ### Attachments
 

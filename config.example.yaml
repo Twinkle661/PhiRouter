@@ -34,7 +34,10 @@ routes:
 
 stream:
   separators: ["\n", "<break />"]
-  show_tool_calls: true
+  show_tool_calls:
+    enabled: true
+    detailed: true            # append the command/path to "Tool started" notices
+    max_detail_length: 120    # runes; longer details are clipped with …
 
 media:
   dir: /data/media

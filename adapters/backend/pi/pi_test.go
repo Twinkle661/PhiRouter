@@ -284,7 +284,23 @@ func TestToolEventsAreNormalizedWithoutResults(t *testing.T) {
 	for _, line := range []string{`{"type":"tool_execution_start","toolName":"bash","args":{"command":"secret"}}`, `{"type":"tool_execution_update","toolName":"bash","partialResult":"large secret output"}`, `{"type":"tool_execution_end","toolName":"bash","isError":true,"durationMs":1234,"result":"secret"}`} {
 		b.record([]byte(line), func(e core.Event) { events = append(events, e) })
 	}
-	if events[0].Tool == nil || events[0].Tool.Phase != core.ToolStarted || events[1].Tool != nil || events[2].Tool == nil || !events[2].Tool.Failed || events[2].Tool.Duration != 1234*time.Millisecond {
+	if events[0].Tool == nil || events[0].Tool.Phase != core.ToolStarted || events[0].Tool.Detail != "secret" || events[1].Tool != nil || events[2].Tool == nil || !events[2].Tool.Failed || events[2].Tool.Detail != "" || events[2].Tool.Duration != 1234*time.Millisecond {
 		t.Fatalf("bad tool events: %+v", events)
+	}
+}
+
+func TestToolDetail(t *testing.T) {
+	for args, want := range map[string]string{
+		`{"command":"git status","timeout":5}`: "git status",
+		`{"path":"src/main.go","offset":10}`:   "src/main.go",
+		`{"pattern":"TODO","path":"internal"}`: "TODO internal",
+		`{"to": "x",  "n": 1}`:                 `{"to":"x","n":1}`,
+		`{}`:                                   "",
+		`not json`:                             "",
+		``:                                     "",
+	} {
+		if got := toolDetail(json.RawMessage(args)); got != want {
+			t.Errorf("toolDetail(%s) = %q, want %q", args, got, want)
+		}
 	}
 }

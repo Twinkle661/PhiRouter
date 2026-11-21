@@ -83,8 +83,12 @@ const (
 )
 
 type ToolEvent struct {
-	Name     string
-	Phase    ToolPhase
+	Name  string
+	Phase ToolPhase
+	// Detail is a short, human-readable summary of the call's arguments chosen
+	// by the backend (for example a shell command or a path). It may contain
+	// sensitive content and is only set on ToolStarted.
+	Detail   string
 	Failed   bool
 	Duration time.Duration
 }

@@ -38,8 +38,8 @@ type Config struct {
 	// and shutdown notices.
 	LifecycleNotify []string `yaml:"lifecycle_notify"`
 	Stream          struct {
-		Separators    []string `yaml:"separators"`
-		ShowToolCalls bool     `yaml:"show_tool_calls"`
+		Separators    []string  `yaml:"separators"`
+		ShowToolCalls ToolCalls `yaml:"show_tool_calls"`
 	} `yaml:"stream"`
 	Media struct {
 		Dir              string        `yaml:"dir"`
@@ -167,6 +167,24 @@ func strict(n *yaml.Node, out any) error {
 	return d.Decode(out)
 }
 
+// ToolCalls controls tool notices: a start notice per call and a notice when
+// a call fails. Detailed appends an argument summary (such as the shell
+// command) to start notices, clipped to MaxDetailLength runes.
+type ToolCalls struct {
+	Enabled         bool `yaml:"enabled"`
+	Detailed        bool `yaml:"detailed"`
+	MaxDetailLength int  `yaml:"max_detail_length"`
+}
+
+// UnmarshalYAML also accepts the earlier boolean form, show_tool_calls: true.
+func (t *ToolCalls) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.ScalarNode {
+		return n.Decode(&t.Enabled)
+	}
+	type plain ToolCalls
+	return strict(n, (*plain)(t))
+}
+
 type Backend struct {
 	Type        string   `yaml:"type"`
 	Command     []string `yaml:"command"`
@@ -190,6 +208,8 @@ func Defaults() Config {
 	c.Timestamp.Format = "[2006-01-02 15:04:05 MST] "
 	c.Backends = map[string]Backend{"default": {Type: "pi", Command: []string{"pi", "--mode", "rpc"}}}
 	c.Stream.Separators = []string{"\n", "<break />"}
+	c.Stream.ShowToolCalls.Detailed = true
+	c.Stream.ShowToolCalls.MaxDetailLength = 120
 	c.Media.Dir = "/data/media"
 	c.Media.InlineImageMaxMB = 5
 	c.Media.TTL = 24 * time.Hour
@@ -434,6 +454,9 @@ func (c Config) Validate(reg Registry, providers ProviderRegistry) error {
 	}
 	if c.Media.Dir == "" || c.Media.TTL <= 0 || c.Media.InlineImageMaxMB < 0 || c.Media.InlineImageMaxMB > 5 || c.QueueLimit < 1 {
 		return fmt.Errorf("invalid media or queue limits")
+	}
+	if c.Stream.ShowToolCalls.MaxDetailLength < 1 {
+		return fmt.Errorf("stream.show_tool_calls.max_detail_length must be at least 1")
 	}
 	for _, s := range c.Stream.Separators {
 		if s == "" {

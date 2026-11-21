@@ -242,27 +242,39 @@ func TestGracefulShutdownActuallyFlushes(t *testing.T) {
 	}
 }
 
-func TestToolOutputSummarizesOnlyStartAndEnd(t *testing.T) {
-	for _, show := range []bool{false, true} {
-		f, b := &fakeFrontend{}, &fakeBackend{}
-		r := New(Options{Routes: fakeRoutes, Owners: fakeOwners, ShowTools: show}, map[string]core.Frontend{"fake": f}, map[string]core.Backend{"test:default": b})
-		events := []core.Event{{Type: "tool_execution_start", Data: []byte(`{"secret":"argument"}`), Tool: &core.ToolEvent{Name: "bash", Phase: core.ToolStarted}}}
-		for i := 0; i < 100; i++ {
-			events = append(events, core.Event{Type: "tool_execution_update", Data: []byte(`{"partialResult":"large secret output"}`)})
-		}
-		events = append(events, core.Event{Type: "tool_execution_end", Data: []byte(`{"result":"secret"}`), Tool: &core.ToolEvent{Name: "bash", Phase: core.ToolFinished, Failed: true, Duration: time.Second}})
-		for _, e := range events {
-			r.event(context.Background(), "test:default", r.states["test:default"], e)
-		}
-		if !show {
-			if len(f.texts) != 0 {
-				t.Fatal(f.texts)
+func TestToolOutputPostsStartsAndFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opt  Options
+		want string
+	}{
+		{"hidden", Options{}, ""},
+		{"plain", Options{ShowTools: true}, "Tool started: bash|Tool failed: bash (1s)|Tool started: read"},
+		{"detailed", Options{ShowTools: true, ToolDetail: true, ToolDetailLimit: 10}, "Tool started: bash · git status|Tool failed: bash (1s)|Tool started: read · 0123456789…"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, b := &fakeFrontend{}, &fakeBackend{}
+			tc.opt.Routes, tc.opt.Owners = fakeRoutes, fakeOwners
+			r := New(tc.opt, map[string]core.Frontend{"fake": f}, map[string]core.Backend{"test:default": b})
+			events := []core.Event{{Type: "tool_execution_start", Data: []byte(`{"secret":"argument"}`), Tool: &core.ToolEvent{Name: "bash", Phase: core.ToolStarted, Detail: "git \n status"}}}
+			for i := 0; i < 100; i++ {
+				events = append(events, core.Event{Type: "tool_execution_update", Data: []byte(`{"partialResult":"large secret output"}`)})
 			}
-			continue
-		}
-		if strings.Join(f.texts, "|") != "Tool started: bash|Tool failed: bash (1s)" {
-			t.Fatalf("unexpected tool output: %v", f.texts)
-		}
+			events = append(events,
+				core.Event{Type: "tool_execution_end", Data: []byte(`{"result":"secret"}`), Tool: &core.ToolEvent{Name: "bash", Phase: core.ToolFinished, Failed: true, Duration: time.Second}},
+				core.Event{Type: "tool_execution_start", Tool: &core.ToolEvent{Name: "read", Phase: core.ToolStarted, Detail: "0123456789abcdef"}},
+				core.Event{Type: "tool_execution_end", Data: []byte(`{"result":"secret"}`), Tool: &core.ToolEvent{Name: "read", Phase: core.ToolFinished, Duration: 40 * time.Millisecond}},
+			)
+			for _, e := range events {
+				r.event(context.Background(), "test:default", r.states["test:default"], e)
+			}
+			if got := strings.Join(f.texts, "|"); got != tc.want {
+				t.Fatalf("unexpected tool output: %q", got)
+			}
+			if strings.Contains(strings.Join(f.texts, "|"), "secret") {
+				t.Fatalf("leaked event data: %v", f.texts)
+			}
+		})
 	}
 }
 
