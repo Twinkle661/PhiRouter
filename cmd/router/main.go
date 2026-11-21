@@ -98,7 +98,7 @@ func run() error {
 		routes = append(routes, router.Route{From: r.From, To: r.To})
 	}
 	timestamp := router.TimestampOptions{Enabled: c.Timestamp.Enabled, Location: c.Timestamp.Location, Format: c.Timestamp.Format}
-	rt := router.New(router.Options{Timestamp: timestamp, Routes: routes, Owners: owners, Separators: c.Stream.Separators, ShowTools: c.Stream.ShowToolCalls, QueueLimit: c.QueueLimit, Hooks: hooks}, frontends, backends)
+	rt := router.New(router.Options{Timestamp: timestamp, Routes: routes, Owners: owners, Separators: c.Stream.Separators, ShowTools: c.Stream.ShowToolCalls.Enabled, ToolDetail: c.Stream.ShowToolCalls.Detailed, ToolDetailLimit: c.Stream.ShowToolCalls.MaxDetailLength, QueueLimit: c.QueueLimit, Hooks: hooks}, frontends, backends)
 	apiListener, err := net.Listen("tcp", c.API.Listen)
 	if err != nil {
 		return err

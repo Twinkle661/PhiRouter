@@ -239,3 +239,28 @@ func TestSendVoiceFromEnvironmentOnly(t *testing.T) {
 		t.Fatal("enabled tool with unregistered provider accepted")
 	}
 }
+
+func TestShowToolCalls(t *testing.T) {
+	for body, want := range map[string]ToolCalls{
+		"":                                   {Enabled: false, Detailed: true, MaxDetailLength: 120},
+		"stream:\n  show_tool_calls: true\n": {Enabled: true, Detailed: true, MaxDetailLength: 120},
+		"stream:\n  show_tool_calls:\n    enabled: true\n    detailed: false\n    max_detail_length: 40\n": {Enabled: true, Detailed: false, MaxDetailLength: 40},
+	} {
+		path, dotenv := write(t, body+base)
+		c, err := Load(path, dotenv, registry, providers)
+		if err != nil || c.Stream.ShowToolCalls != want {
+			t.Fatalf("%q: %+v %v", body, c.Stream.ShowToolCalls, err)
+		}
+	}
+	t.Setenv("ROUTER_STREAM__SHOW_TOOL_CALLS__ENABLED", "true")
+	path, dotenv := write(t, base)
+	if c, err := Load(path, dotenv, registry, providers); err != nil || !c.Stream.ShowToolCalls.Enabled {
+		t.Fatalf("environment override: %+v %v", c.Stream.ShowToolCalls, err)
+	}
+	for _, body := range []string{"stream:\n  show_tool_calls:\n    enabeld: true\n", "stream:\n  show_tool_calls:\n    max_detail_length: 0\n"} {
+		path, dotenv := write(t, body+base)
+		if _, err := Load(path, dotenv, registry, providers); err == nil {
+			t.Fatalf("%q: expected an error", body)
+		}
+	}
+}

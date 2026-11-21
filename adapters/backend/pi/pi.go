@@ -3,6 +3,7 @@ package pi
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -476,15 +477,15 @@ func (b *Backend) record(line []byte, emit func(core.Event)) {
 	if m.Type == "tool_execution_start" || m.Type == "tool_execution_end" {
 		var tool struct {
 			ToolName   string
+			Args       json.RawMessage
 			IsError    bool
 			DurationMS float64
 		}
 		if json.Unmarshal(line, &tool) == nil {
-			phase := core.ToolStarted
+			e.Tool = &core.ToolEvent{Name: tool.ToolName, Phase: core.ToolStarted, Detail: toolDetail(tool.Args)}
 			if m.Type == "tool_execution_end" {
-				phase = core.ToolFinished
+				e.Tool = &core.ToolEvent{Name: tool.ToolName, Phase: core.ToolFinished, Failed: tool.IsError, Duration: time.Duration(tool.DurationMS * float64(time.Millisecond))}
 			}
-			e.Tool = &core.ToolEvent{Name: tool.ToolName, Phase: phase, Failed: tool.IsError, Duration: time.Duration(tool.DurationMS * float64(time.Millisecond))}
 		}
 	}
 	emit(e)
@@ -494,6 +495,30 @@ func (b *Backend) record(line []byte, emit func(core.Event)) {
 			emit(core.Event{Type: "error", Text: msg.ErrorMessage})
 		}
 	}
+}
+
+// toolDetail summarizes tool arguments: the well-known fields of pi's
+// built-in tools (bash, read, edit, write, grep, find, ls) when present,
+// otherwise the compact JSON object. Length limits are the router's concern.
+func toolDetail(args json.RawMessage) string {
+	var fields map[string]any
+	if json.Unmarshal(args, &fields) != nil || len(fields) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, key := range []string{"command", "pattern", "path", "url", "query"} {
+		if s, ok := fields[key].(string); ok && strings.TrimSpace(s) != "" {
+			parts = append(parts, s)
+		}
+	}
+	if len(parts) > 0 {
+		return strings.Join(parts, " ")
+	}
+	var compact bytes.Buffer
+	if json.Compact(&compact, args) != nil {
+		return ""
+	}
+	return compact.String()
 }
 func (b *Backend) persist(session string) error {
 	if err := os.MkdirAll(filepath.Dir(b.opt.StatePath), 0700); err != nil {

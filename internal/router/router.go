@@ -25,9 +25,14 @@ type Options struct {
 	// backend reached only through wildcard routes initially replies there.
 	Owners     map[string]string
 	Separators []string
-	ShowTools  bool
-	QueueLimit int
-	Hooks      []core.Hook
+	// ShowTools posts a notice when a tool starts and when one fails.
+	// ToolDetail appends the backend's argument summary to start notices,
+	// clipped to ToolDetailLimit runes (default 120).
+	ShowTools       bool
+	ToolDetail      bool
+	ToolDetailLimit int
+	QueueLimit      int
+	Hooks           []core.Hook
 }
 type request struct {
 	e        core.Envelope
@@ -61,6 +66,9 @@ type Router struct {
 func New(o Options, f map[string]core.Frontend, b map[string]core.Backend) *Router {
 	if o.QueueLimit < 1 {
 		o.QueueLimit = 256
+	}
+	if o.ToolDetailLimit < 1 {
+		o.ToolDetailLimit = 120
 	}
 	r := &Router{opt: o, frontends: f, states: map[string]*state{}, in: make(chan request, 64), events: make(chan backendEvent, 1024), done: make(chan struct{})}
 	for key, backend := range b {
@@ -443,7 +451,7 @@ func (r *Router) handle(ctx context.Context, s *state, e core.Event) {
 		}
 	}
 	if r.opt.ShowTools && e.Tool != nil {
-		if text := toolSummary(*e.Tool); text != "" {
+		if text := r.toolSummary(*e.Tool); text != "" {
 			r.system(ctx, s, text)
 		}
 	}
@@ -579,26 +587,26 @@ func clone(e core.Envelope) core.Envelope {
 	return e
 }
 
-// Tool summaries exclude arguments, results and incremental updates. These may
-// be large or contain sensitive content; hooks still receive the full event.
-func toolSummary(tool core.ToolEvent) string {
-	name := strings.Join(strings.Fields(tool.Name), " ")
+// Tool summaries exclude results and incremental updates, and include the
+// argument summary only with ToolDetail. Successful completions are not
+// posted: the agent's reply already marks the end. Hooks receive full events.
+func (r *Router) toolSummary(tool core.ToolEvent) string {
+	name := clip(tool.Name, 80)
 	if name == "" {
 		name = "unknown"
 	}
-	runes := []rune(name)
-	if len(runes) > 80 {
-		name = string(runes[:80]) + "…"
-	}
 	switch tool.Phase {
 	case core.ToolStarted:
-		return "Tool started: " + name
-	case core.ToolFinished:
-		status := "completed"
-		if tool.Failed {
-			status = "failed"
+		text := "Tool started: " + name
+		if detail := clip(tool.Detail, r.opt.ToolDetailLimit); r.opt.ToolDetail && detail != "" {
+			text += " · " + detail
 		}
-		text := "Tool " + status + ": " + name
+		return text
+	case core.ToolFinished:
+		if !tool.Failed {
+			return ""
+		}
+		text := "Tool failed: " + name
 		if tool.Duration > 0 {
 			text += fmt.Sprintf(" (%s)", tool.Duration.Round(time.Millisecond))
 		}
@@ -606,6 +614,15 @@ func toolSummary(tool core.ToolEvent) string {
 	default:
 		return ""
 	}
+}
+
+// clip collapses whitespace to single spaces and keeps at most limit runes.
+func clip(s string, limit int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if runes := []rune(s); len(runes) > limit {
+		s = string(runes[:limit]) + "…"
+	}
+	return s
 }
 
 func sessionDetails(st core.BackendState) string {
