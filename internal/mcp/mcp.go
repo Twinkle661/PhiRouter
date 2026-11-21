@@ -8,6 +8,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"github.com/Twinkle661/PhiRouter/internal/core"
 	"io"
 	"net/http"
 	"net/url"
@@ -120,7 +121,7 @@ func New(o Options) http.Handler {
 			}
 			route := o.Route
 			if len(o.Routes) > 0 {
-				route = r.Header.Get("X-PhiRouter-Route")
+				route = r.Header.Get(core.RouteHeader)
 				if !o.Routes[route] {
 					rpc(w, req.ID, nil, -32602, "Unknown backend return route")
 					return

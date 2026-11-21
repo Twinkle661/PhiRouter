@@ -79,6 +79,7 @@ type Frontend struct {
 }
 type answer struct {
 	reply   core.Reply
+	label   string
 	chat    int64
 	message int64
 	title   string
@@ -261,7 +262,8 @@ func (f *Frontend) handle(ctx context.Context, u update, receive func(context.Co
 		a, ok := f.replies[m.Reply.ID]
 		f.mu.Unlock()
 		if ok && a.chat == m.Chat.ID && !expired(a) {
-			a.reply.Value = m.Text
+			a.reply.Text = m.Text
+			a.label = m.Text
 			if err := receive(ctx, core.Envelope{Source: source, Reply: &a.reply}); err != nil {
 				return err
 			}
@@ -492,29 +494,38 @@ func (f *Frontend) Dialog(ctx context.Context, chat string, d core.Dialog) error
 	text = chunks(f.decorate(text, compact), 4096)[0]
 	body := map[string]any{"chat_id": chat, "text": text}
 	expiry := time.Time{}
-	if d.TimeoutMS > 0 {
-		expiry = time.Now().Add(time.Duration(d.TimeoutMS) * time.Millisecond)
+	if d.Timeout > 0 {
+		expiry = time.Now().Add(d.Timeout)
 	}
 	entries := map[string]answer{}
-	if d.Method == "input" || d.Method == "editor" {
+	if d.Kind == core.DialogInput {
 		body["reply_markup"] = map[string]any{"force_reply": true, "selective": true}
 	} else {
 		var rows [][]map[string]string
-		options := d.Options
-		if d.Method == "confirm" {
-			options = []string{"Yes", "No"}
-		} else {
-			options = append(append([]string(nil), options...), "Cancel")
+		// Dialogs with a rejecting option already have a way out.
+		cancellable := true
+		for _, o := range d.Options {
+			cancellable = cancellable && !o.Kind.Rejects()
 		}
-		for i, label := range options {
+		type button struct {
+			label string
+			reply core.Reply
+		}
+		var buttons []button
+		for _, o := range d.Options {
+			buttons = append(buttons, button{o.Label, core.Reply{ID: d.ID, OptionID: o.ID}})
+		}
+		if cancellable {
+			buttons = append(buttons, button{"Cancel", core.Reply{ID: d.ID, Cancelled: true}})
+		}
+		for _, b := range buttons {
 			buf := make([]byte, 12)
 			if _, err = rand.Read(buf); err != nil {
 				return err
 			}
 			token := hex.EncodeToString(buf)
-			reply := core.Reply{ID: d.ID, Value: label, Confirmed: label == "Yes", Cancelled: d.Method != "confirm" && i == len(options)-1}
-			entries[token] = answer{reply: reply, chat: cid, title: d.Title, compact: compact, expires: expiry}
-			rows = append(rows, []map[string]string{{"text": label, "callback_data": token}})
+			entries[token] = answer{reply: b.reply, label: b.label, chat: cid, title: d.Title, compact: compact, expires: expiry}
+			rows = append(rows, []map[string]string{{"text": b.label, "callback_data": token}})
 		}
 		// Telegram limits keyboards to 100 buttons; split large model menus into pages of messages.
 		if len(rows) > 90 {
@@ -571,7 +582,7 @@ func (f *Frontend) clear(id string, chat int64) {
 	}
 }
 func (f *Frontend) selected(ctx context.Context, a answer) error {
-	value := a.reply.Value
+	value := a.label
 	if a.reply.Cancelled {
 		value = "Cancelled"
 	}

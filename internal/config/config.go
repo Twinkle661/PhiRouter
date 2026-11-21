@@ -42,10 +42,13 @@ type Config struct {
 		ShowToolCalls ToolCalls `yaml:"show_tool_calls"`
 	} `yaml:"stream"`
 	Media struct {
-		Dir              string        `yaml:"dir"`
-		InlineImageMaxMB int64         `yaml:"inline_image_max_mb"`
-		TTL              time.Duration `yaml:"ttl"`
+		Dir string        `yaml:"dir"`
+		TTL time.Duration `yaml:"ttl"`
 	} `yaml:"media"`
+	// State holds per-backend state directories, <dir>/<backend name>.
+	State struct {
+		Dir string `yaml:"dir"`
+	} `yaml:"state"`
 	API Endpoint `yaml:"api"`
 	MCP MCP      `yaml:"mcp"`
 	// Ingress serves webhook endpoints for frontends that declare an
@@ -53,9 +56,6 @@ type Config struct {
 	Ingress struct {
 		Listen string `yaml:"listen"`
 	} `yaml:"ingress"`
-	Prompts struct {
-		Attachment string `yaml:"attachment"`
-	} `yaml:"prompts"`
 	Plugins    []Plugin `yaml:"plugins"`
 	QueueLimit int      `yaml:"queue_limit"`
 }
@@ -185,11 +185,53 @@ func (t *ToolCalls) UnmarshalYAML(n *yaml.Node) error {
 	return strict(n, (*plain)(t))
 }
 
+// Backend is one backend instance. Options holds a pointer to the options
+// struct registered for Type; Load decodes it strictly.
 type Backend struct {
-	Type        string   `yaml:"type"`
-	Command     []string `yaml:"command"`
-	SessionFile string   `yaml:"session_file"`
+	Type string `yaml:"type"`
+	// BusyPolicy is "queue" (default) or "interrupt": what a user message
+	// does while a backend that cannot steer is busy.
+	BusyPolicy string `yaml:"busy_policy"`
+	Options    any    `yaml:"options"`
+	raw        *yaml.Node
 }
+
+func (b *Backend) UnmarshalYAML(n *yaml.Node) error {
+	var aux struct {
+		Type       string    `yaml:"type"`
+		BusyPolicy string    `yaml:"busy_policy"`
+		Options    yaml.Node `yaml:"options"`
+	}
+	if err := strict(n, &aux); err != nil {
+		return err
+	}
+	b.Type, b.BusyPolicy, b.Options, b.raw = aux.Type, aux.BusyPolicy, nil, nil
+	if aux.Options.Kind != 0 {
+		b.raw = &aux.Options
+	}
+	return nil
+}
+
+// BackendType describes a backend adapter's options contract. NewOptions
+// returns a pointer to its options struct filled with defaults; if that has
+// a Validate() error method, Validate calls it.
+type BackendType struct {
+	NewOptions func() any
+}
+type BackendRegistry map[string]BackendType
+
+// Registries are the adapter types compiled into the binary, supplied by the
+// composition root so configuration never imports adapters.
+type Registries struct {
+	Frontends Registry
+	Backends  BackendRegistry
+	Providers ProviderRegistry
+}
+
+// DefaultBackend is used when the configuration defines no backends.
+const DefaultBackend = "default"
+const defaultBackendType = "pi"
+
 type Route struct {
 	From string `yaml:"from"`
 	To   string `yaml:"to"`
@@ -206,21 +248,19 @@ func Defaults() Config {
 	var c Config
 	c.Timestamp.Timezone = "UTC"
 	c.Timestamp.Format = "[2006-01-02 15:04:05 MST] "
-	c.Backends = map[string]Backend{"default": {Type: "pi", Command: []string{"pi", "--mode", "rpc"}}}
 	c.Stream.Separators = []string{"\n", "<break />"}
 	c.Stream.ShowToolCalls.Detailed = true
 	c.Stream.ShowToolCalls.MaxDetailLength = 120
 	c.Media.Dir = "/data/media"
-	c.Media.InlineImageMaxMB = 5
+	c.State.Dir = "/data/state"
 	c.Media.TTL = 24 * time.Hour
 	c.API.Listen = "127.0.0.1:8080"
 	c.MCP.Listen = "127.0.0.1:8081"
 	c.MCP.Tools.SendVoice.Provider.Type = "openai_speech"
-	c.Prompts.Attachment = "[attachment: {path} ({mime}, {size})]"
 	c.QueueLimit = 256
 	return c
 }
-func Load(path, dotenv string, reg Registry, providers ProviderRegistry) (Config, error) {
+func Load(path, dotenv string, reg Registries) (Config, error) {
 	c := Defaults()
 	raw, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
@@ -258,13 +298,16 @@ func Load(path, dotenv string, reg Registry, providers ProviderRegistry) (Config
 	// Adapter options are typed by their instance's type, which may itself
 	// come from the environment, so they are materialized between two passes.
 	isOptions := func(path []string) bool {
-		frontend := len(path) >= 3 && path[0] == "frontends" && path[2] == "options"
+		frontend := len(path) >= 3 && (path[0] == "frontends" || path[0] == "backends") && path[2] == "options"
 		provider := len(path) >= 5 && path[0] == "mcp" && path[1] == "tools" && path[3] == "provider" && path[4] == "options"
 		return frontend || provider
 	}
 	for _, pass := range []bool{false, true} {
 		if pass {
-			if err = c.materialize(reg, providers); err != nil {
+			if len(c.Backends) == 0 {
+				c.Backends = map[string]Backend{DefaultBackend: {Type: defaultBackendType}}
+			}
+			if err = c.materialize(reg); err != nil {
 				return c, err
 			}
 		}
@@ -278,7 +321,7 @@ func Load(path, dotenv string, reg Registry, providers ProviderRegistry) (Config
 			}
 		}
 	}
-	if err = c.Validate(reg, providers); err != nil {
+	if err = c.Validate(reg); err != nil {
 		return c, err
 	}
 	if c.Timestamp.Enabled {
@@ -289,9 +332,9 @@ func Load(path, dotenv string, reg Registry, providers ProviderRegistry) (Config
 }
 
 // materialize decodes each adapter instance's options into its registered type.
-func (c *Config) materialize(reg Registry, providers ProviderRegistry) error {
+func (c *Config) materialize(reg Registries) error {
 	if p := &c.MCP.Tools.SendVoice.Provider; p.Options == nil && p.Type != "" {
-		t, ok := providers[p.Type]
+		t, ok := reg.Providers[p.Type]
 		switch {
 		case ok:
 			p.Options = t.NewOptions()
@@ -309,7 +352,7 @@ func (c *Config) materialize(reg Registry, providers ProviderRegistry) error {
 		if f.Options != nil {
 			continue
 		}
-		t, ok := reg[f.Type]
+		t, ok := reg.Frontends[f.Type]
 		if !ok {
 			return fmt.Errorf("frontend %s: unknown type %q", name, f.Type)
 		}
@@ -321,6 +364,23 @@ func (c *Config) materialize(reg Registry, providers ProviderRegistry) error {
 			f.raw = nil
 		}
 		c.Frontends[name] = f
+	}
+	for name, b := range c.Backends {
+		if b.Options != nil {
+			continue
+		}
+		t, ok := reg.Backends[b.Type]
+		if !ok {
+			return fmt.Errorf("backend %s: unknown type %q", name, b.Type)
+		}
+		b.Options = t.NewOptions()
+		if b.raw != nil {
+			if err := strict(b.raw, b.Options); err != nil {
+				return fmt.Errorf("backend %s options: %w", name, err)
+			}
+			b.raw = nil
+		}
+		c.Backends[name] = b
 	}
 	return nil
 }
@@ -411,7 +471,8 @@ func set(v reflect.Value, path []string, raw string) error {
 var instanceName = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 var ingressPath = regexp.MustCompile(`^(/[A-Za-z0-9._~-]+)+$`)
 
-func (c Config) Validate(reg Registry, providers ProviderRegistry) error {
+func (c Config) Validate(regs Registries) error {
+	reg, providers := regs.Frontends, regs.Providers
 	if c.Timestamp.Enabled {
 		if strings.TrimSpace(c.Timestamp.Timezone) == "" || strings.TrimSpace(c.Timestamp.Format) == "" {
 			return fmt.Errorf("timestamp.timezone and timestamp.format must not be empty when enabled")
@@ -452,8 +513,11 @@ func (c Config) Validate(reg Registry, providers ProviderRegistry) error {
 			return fmt.Errorf("ingress listener must differ from API and MCP")
 		}
 	}
-	if c.Media.Dir == "" || c.Media.TTL <= 0 || c.Media.InlineImageMaxMB < 0 || c.Media.InlineImageMaxMB > 5 || c.QueueLimit < 1 {
+	if c.Media.Dir == "" || c.Media.TTL <= 0 || c.QueueLimit < 1 {
 		return fmt.Errorf("invalid media or queue limits")
+	}
+	if c.State.Dir == "" {
+		return fmt.Errorf("state.dir must not be empty")
 	}
 	if c.Stream.ShowToolCalls.MaxDetailLength < 1 {
 		return fmt.Errorf("stream.show_tool_calls.max_detail_length must be at least 1")
@@ -520,16 +584,25 @@ func (c Config) Validate(reg Registry, providers ProviderRegistry) error {
 		return fmt.Errorf("backends and routes are required")
 	}
 	for name, b := range c.Backends {
-		if b.Type != "pi" || len(b.Command) == 0 || b.Command[0] == "" {
-			return fmt.Errorf("invalid backend %s", name)
+		if !instanceName.MatchString(name) {
+			return fmt.Errorf("backend name %q must use lowercase letters, digits, - or _", name)
+		}
+		if _, ok := regs.Backends[b.Type]; !ok {
+			return fmt.Errorf("backend %s: unknown type %q", name, b.Type)
+		}
+		if b.BusyPolicy != "" && b.BusyPolicy != "queue" && b.BusyPolicy != "interrupt" {
+			return fmt.Errorf("backend %s: busy_policy must be queue or interrupt", name)
+		}
+		if v, ok := b.Options.(interface{ Validate() error }); ok {
+			if err := v.Validate(); err != nil {
+				return fmt.Errorf("backend %s options: %w", name, err)
+			}
 		}
 	}
 	seen := map[string]bool{}
 	for _, r := range c.Routes {
-		kind, name, ok := strings.Cut(r.To, ":")
-		b, exists := c.Backends[name]
-		if !ok || !exists || kind != b.Type {
-			return fmt.Errorf("unknown route destination %s", r.To)
+		if _, exists := c.Backends[r.To]; !exists {
+			return fmt.Errorf("unknown route destination %q (routes name a backend)", r.To)
 		}
 		name, address, ok := strings.Cut(r.From, ":")
 		front, exists := c.Frontends[name]

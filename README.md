@@ -4,22 +4,25 @@
 
 Most agent harnesses are CLI-native, and each one that wants a chat interface ends up shipping its own bot integration. PhiRouter separates those concerns: harnesses plug in as **backends**, chat platforms plug in as **frontends**, and a transport-independent core routes conversations between them. A backend should not need to know which frontend it is talking to, and the reverse.
 
-The architecture is built for **many backends × many frontends**. The first release implements one pair:
+The architecture is built for **many backends × many frontends**:
 
 | Side | Adapter | Transport | Status |
 | --- | --- | --- | --- |
 | Backend | [pi](https://github.com/earendil-works/pi) coding agent | `pi --mode rpc` (stdin/stdout JSONL) | ✅ implemented |
+| Backend | Any [ACP](https://agentclientprotocol.com) agent, e.g. `opencode acp` | JSON-RPC 2.0 over stdio | ✅ implemented |
 | Frontend | Telegram bot (single bound user) | Bot API long polling | ✅ implemented |
-| Backend | Other harnesses (e.g. over HTTP or ACP) | adapter-private | planned |
+| Backend | Native harness protocols (e.g. Codex app-server) | adapter-private | planned |
 | Frontend | Other chat platforms (polling, WebSocket or webhook) | adapter-private | planned |
+
+Backends differ in what they can do: pi steers a running turn and queues follow-ups itself, while ACP agents take one prompt at a time. Each backend declares `core.Capabilities`, and the router fills the gaps (see [Scheduling](#scheduling)).
 
 ## What it does
 
-- **Routing**: declare frontend and backend instances in config and connect them with rules such as `tg:* → pi:default`. Several frontend instances (even two bots of the same platform) and several backend instances can run side by side.
+- **Routing**: declare frontend and backend instances in config and connect them with rules such as `tg:* → default`. Several frontend instances (even two bots of the same platform) and several backend instances can run side by side.
 - **Text, images, voice and files in both directions**: attachments are passed to the agent by path in a shared media directory, never as inline blobs.
 - **Streaming as chat bubbles**: model output is split into separate messages on configurable separators.
-- **Interrupts and priorities**: user messages steer a busy agent; plugin messages queue behind it; `/abort` really stops.
-- **Interactive dialogs**: the backend's select / confirm / input prompts become inline buttons and replies.
+- **Interrupts and priorities**: user messages steer a busy agent where the backend can, otherwise wait or interrupt by policy; plugin messages queue behind them; `/abort` really stops.
+- **Interactive dialogs**: the backend's select / confirm / input prompts and permission requests become inline buttons and replies.
 - **Proactive messages**: an authenticated HTTP injection API lets external processes (schedulers, reminder bots) start a turn.
 - **Agent → user delivery**: a built-in MCP server gives the agent a `send_file` tool and, optionally, `send_voice` (text-to-speech through any OpenAI-compatible speech endpoint).
 - **Hooks**: in-process plugins can transform or drop inbound/outbound messages and observe events.
@@ -40,17 +43,18 @@ The architecture is built for **many backends × many frontends**. The first rel
       MCP send_file  ───▶ └─┬───────────────────────┘
                             │ typed backend operations
             ┌───────────────┴───────────────────┐
-            │  pi (stdio JSONL)  (future: …)    │
+            │  pi (stdio JSONL) · acp (JSON-RPC)│
             └──────────── backends ─────────────┘
 ```
 
 Design rules:
 
-- **`internal/core` is the only shared vocabulary.** It defines `Envelope` / `Part` (text, image, audio, file), the `Frontend` and `Backend` interfaces, `Hook`, `MediaStore`, and scheduling intent (`DeliveryStart`, `DeliveryInterrupt`, `DeliveryQueue`).
+- **`internal/core` is the only shared vocabulary.** It defines `Envelope` / `Part` (text, image, audio, file), the `Frontend` and `Backend` interfaces, `Hook`, `MediaStore`, backend `Capabilities` and delivery modes (`DeliveryPrompt`, `DeliverySteer`, `DeliveryFollowUp`).
+- **Backend events use ACP's vocabulary.** Adapters translate their wire protocol into typed `core.Event` kinds (message chunks, tool calls with ACP statuses, dialogs, turn ends with a stop reason). Records without router meaning pass through as `EventExtension` with the original record in `Raw`, so hooks still see everything.
 - **Addresses are opaque.** A frontend reports and receives bare, adapter-defined addresses (a Telegram chat ID, a Discord channel, a WhatsApp JID…). The router qualifies them as `<instance>:<address>`; the config layer asks the adapter to validate them.
 - **Adapters depend on `core` and nothing else.** Adapters, router and plugins never import one another; a test (`internal/core/architecture_test.go`) enforces this.
-- **Transport is a backend detail.** pi's JSONL wire commands and JSON maps stay private to its adapter. Backend adapters expose typed operations (`Submit`, `Status`, `Models`, `SetModel`, `NewSession`, `Abort`, `Respond`, `Restart`) with typed results.
-- **Composition lives in `cmd/router`.** A registry of adapter types (`cmd/router/frontends.go`) builds configured instances; config, core and router contain no platform knowledge.
+- **Transport is a backend detail.** Wire commands, session files and agent configuration (such as pi's `mcp.json`) stay private to each adapter. Backend adapters expose typed operations (`Prompt`, `Status`, `Models`, `SetModel`, `NewSession`, `Cancel`, `Respond`, `Restart`) with typed results.
+- **Composition lives in `cmd/router`.** Registries of adapter types (`cmd/router/frontends.go`, `backends.go`, `tools.go`) build configured instances; config, core and router contain no platform or harness knowledge.
 - **Minimal dependencies.** The only third-party Go module is `gopkg.in/yaml.v3`. Telegram, HTTP, JSON-RPC, subprocess management, dotenv parsing and UUIDs use the standard library.
 
 ```
@@ -64,6 +68,7 @@ internal/ingress/           webhook listener for frontends that need one
 internal/mcp/               MCP protocol server and tool registry
 internal/tools/             MCP tools (send_file, send_voice)
 adapters/backend/pi/        pi RPC backend
+adapters/backend/acp/       Agent Client Protocol backend
 adapters/frontend/telegram/ Telegram frontend
 adapters/tts/openaispeech/  OpenAI-compatible speech provider
 plugins/                    optional built-in hooks (prefix, ticker)
@@ -90,7 +95,7 @@ Open a private chat with your bot and send a message. Telegram requires you to c
 Deployment notes:
 
 - Router and pi run in **one container** as the non-root `node` user; the router spawns pi as a child process. Config is mounted read-only.
-- The pi login, session pointer, extensions and `mcp.json` live in the `pi-agent` volume; files live in the `media` volume.
+- The pi login, session pointer, extensions and `mcp.json` live in the `pi-agent` volume; files live in the `media` volume; other backends keep their state (such as an ACP session ID) in the `state` volume under `state.dir/<backend name>`.
 - The injection API is reachable by sibling containers at `http://router:8080` but is **not published to the host**. To reach it from the host, add a loopback-only mapping (`127.0.0.1:8080:8080`). Never publish it on a public interface. MCP stays bound to `127.0.0.1:8081` inside the container.
 - To use provider API keys instead of interactive login, add the provider's variable (e.g. `ANTHROPIC_API_KEY`) to `.env`; Compose passes it to pi.
 - The image pins **pi 1.6.0** on the Node 22 line (pi needs Node ≥ 22.19) and builds with Go 1.26. Upgrading pi means re-checking its RPC contract and running the tests.
@@ -123,7 +128,7 @@ Every field can be overridden with a double-underscore path. Arrays and maps acc
 export ROUTER_STREAM__SHOW_TOOL_CALLS__ENABLED=true
 export ROUTER_STREAM__SEPARATORS='["\n", "<break />"]'
 export ROUTER_MEDIA__TTL=48h
-export ROUTER_BACKENDS__DEFAULT__COMMAND='["pi", "--mode", "rpc", "--provider", "anthropic"]'
+export ROUTER_BACKENDS__DEFAULT__OPTIONS__COMMAND='["pi", "--mode", "rpc", "--provider", "anthropic"]'
 export ROUTER_ROUTES__0__FROM='tg:123456789'
 export ROUTER_FRONTENDS__TG__OPTIONS__TOKEN='123456:bot-token'
 ```
@@ -176,10 +181,54 @@ ingress:
 
 The listener starts only if at least one frontend declares a path. Request bodies are capped at 1 MiB; signature verification is the adapter's job. Put TLS in front of it with your usual reverse proxy. A frontend type that does not support webhooks fails startup if given a path.
 
+### Backends
+
+Each entry under `backends` is an instance, named like frontends. Without a `backends` section the router runs one pi instance called `default`; declaring any backend replaces it.
+
+```yaml
+backends:
+  default:
+    type: pi
+    options:
+      command: ["pi", "--mode", "rpc"]
+  coder:
+    type: acp
+    busy_policy: interrupt     # queue (default) or interrupt; see Scheduling
+    options:
+      command: ["opencode", "acp"]
+      cwd: /workspace
+```
+
+- `type` picks the adapter; `options` belong to it and are strict like frontend options (`ROUTER_BACKENDS__<NAME>__OPTIONS__<KEY>`).
+- `busy_policy` is a router setting: what a user message does while a backend that cannot steer is busy.
+- Backend `command` arrays are executed directly, without a shell.
+
+#### pi options
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `command` | `["pi", "--mode", "rpc"]` | pi in RPC mode. |
+| `session_file` | empty | Pin a session file; empty resumes the last session. |
+| `agent_dir` | `~/.pi/agent` | pi's agent directory; when set it is also passed as `PI_CODING_AGENT_DIR`. |
+| `attachment` | `[attachment: {path} ({mime}, {size})]` | Text line describing each attached file. |
+| `inline_image_max_mb` | `5` | Images up to this size are also sent inline (max 5, `0` disables). |
+
+#### acp options
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `command` | required | The agent in ACP mode, e.g. `["opencode", "acp"]`. |
+| `cwd` | required | Absolute working directory of the session. |
+| `env` | `{}` | Extra environment variables for the agent. |
+| `permission` | `ask` | `ask` shows permission requests as dialogs; `allow` / `reject` answer them with the agent's allow-once / reject-once option. |
+| `inline_image_max_mb` | `5` | Images up to this size are sent inline if the agent accepts images; other files are sent as `file://` resource links. |
+
+The router advertises no file system or terminal access, so agents use their own tools. The router's MCP endpoint is passed in `session/new` when the agent accepts HTTP MCP servers. The session ID is stored in `state.dir/<name>/session.json` and resumed with `session/load` when the agent supports it; the replayed history is not re-sent to the chat. Authenticate the agent beforehand (for example `opencode auth login`).
+
 ### Routes and multiple backends
 
-- Route sources are `<frontend instance>:<address>` or `<frontend instance>:*`; destinations are `<backend type>:<backend name>`.
-- Each backend instance keeps one conversation/session. Declare several pi backends with distinct names and route sources to them independently.
+- Route sources are `<frontend instance>:<address>` or `<frontend instance>:*`; destinations are backend instance names.
+- Each backend instance keeps one conversation/session. Declare several backends, of the same or different types, and route sources to them independently.
 - Exact routes take precedence over wildcards. Avoid overlapping routes to the same source if you expect separate conversations.
 - Proactive traffic returns to the backend's last authorized source, or its configured exact route. A wildcard with no prior inbound traffic defaults to that frontend's owner.
 
@@ -204,31 +253,37 @@ This yields `[2026-11-21 14:30:00 GMT] Hello`. The prefix is applied once, befor
 | --- | --- |
 | `/retry` | Resubmit the most recent accepted user message, including attachments. |
 | `/restart` | Capture the current session and restart the backend. |
-| `/model` | List models; `/model provider/model-id` selects one directly. |
+| `/model` | List models; `/model provider/model-id` (or a bare model ID for backends without providers) selects one directly. |
 | `/new` | Start a new session and show its ID, provider and model. |
 | `/abort` | Clear queued work and abort the current generation. |
 | `/status` | Show readiness, session, model, activity and queue length. |
 
-Unknown slash commands are forwarded to the backend, so pi extension commands, skills and prompt templates keep working.
+Unknown slash commands are forwarded to the backend, so agent commands, skills and prompt templates keep working. `/model` and `/new` report "not supported" on backends without those capabilities.
 
 ### Scheduling
 
-- While the agent is busy, user messages **steer** it (at pi's turn/tool boundaries; a running tool is not killed) and plugin messages **queue** as follow-ups.
-- The pi adapter implements both through `prompt.streamingBehavior`, so a run finishing mid-dispatch cannot strand a message.
-- Plugin slash commands are rejected while busy, because pi executes extension commands immediately.
-- Output is flushed at message and run end, but the backend is considered idle only on `agent_settled`.
+What happens to a message while the agent is busy depends on the backend's capabilities:
+
+| Message | Backend can steer | Backend queues follow-ups | Neither (e.g. ACP) |
+| --- | --- | --- | --- |
+| User | steers the running turn | follows up | `busy_policy: queue` holds it until the turn ends; `interrupt` cancels the turn, then sends it |
+| Plugin / API | follows up | follows up | held until the turn ends |
+
+- Held messages go out one per turn, user messages first, and count toward `queue_limit`.
+- pi does both: user messages steer at its turn/tool boundaries (a running tool is not killed) and plugin messages queue as follow-ups, through `prompt.streamingBehavior`, so a run finishing mid-dispatch cannot strand a message. Plugin slash commands are rejected while pi is busy, because pi executes extension commands immediately.
+- Output is flushed at message and turn end; the backend is idle only once its turn ends (pi's `agent_settled`, ACP's `session/prompt` response).
 
 ### Dialogs
 
-Select and confirm dialogs become inline buttons; input and editor dialogs use ForceReply, so answer by replying to that message. The original message is updated with the selection. Timeouts belong to the backend; expired callbacks are ignored. Large model lists are split across several messages.
+Select, confirm and permission dialogs become inline buttons; input and editor dialogs use ForceReply, so answer by replying to that message. A Cancel button is added unless the dialog already has a rejecting option. The original message is updated with the selection. Timeouts belong to the backend; expired callbacks are ignored. Large model lists are split across several messages.
 
 ### Output formatting
 
-Text is sent as plain text (no Markdown) so arbitrary model output never triggers Telegram parse errors. Separators are removed even when split across RPC events; empty bubbles are skipped. The router does not split by length; each frontend enforces its platform limit (Telegram splits at 4096 UTF-16 units). Tool calls are hidden by default. With `stream.show_tool_calls.enabled`, one notice is posted when each tool starts and one more only if it fails (with its duration); successful completions are silent, since the agent's reply marks the end. With `detailed` (the default), start notices also show a one-line argument summary, such as `Tool started: bash · git status`: the command, pattern, path, URL or query of pi's built-in tools, otherwise the compact JSON arguments, clipped to `max_detail_length` runes (default 120). Details travel through the chat platform, so set `detailed: false` if arguments may hold secrets. Results are never posted; full events stay available to hooks. The older `show_tool_calls: true` form still works.
+Text is sent as plain text (no Markdown) so arbitrary model output never triggers Telegram parse errors. Separators are removed even when split across RPC events; empty bubbles are skipped. The router does not split by length; each frontend enforces its platform limit (Telegram splits at 4096 UTF-16 units). Tool calls are hidden by default. With `stream.show_tool_calls.enabled`, one notice is posted when each tool starts and one more only if it fails (with its duration); successful completions are silent, since the agent's reply marks the end. With `detailed` (the default), start notices also show a one-line argument summary, such as `Tool started: bash · git status`: the command, pattern, path, URL or query of the tool's arguments, otherwise the compact JSON arguments, clipped to `max_detail_length` runes (default 120). Details travel through the chat platform, so set `detailed: false` if arguments may hold secrets. Results are never posted; full events stay available to hooks. The older `show_tool_calls: true` form still works.
 
 ### Attachments
 
-Incoming files are saved under `media.dir/in/` with random UUID names and passed to the agent as a text line (`prompts.attachment`, e.g. `[attachment: /data/media/in/<uuid>.pdf (application/pdf, 12.3 MB)]`). Incoming audio and video are treated as ordinary files: no STT or document parsing. Files under `in/` and `out/` are removed after `media.ttl`. Image thresholds and download limits use MiB; displayed sizes use decimal MB.
+Incoming files are saved under `media.dir/in/` with random UUID names and passed to the agent by path: pi gets a text line (its `attachment` option, e.g. `[attachment: /data/media/in/<uuid>.pdf (application/pdf, 12.3 MB)]`), ACP agents get a `file://` resource link. Incoming audio and video are treated as ordinary files: no STT or document parsing. Files under `in/` and `out/` are removed after `media.ttl`. Image thresholds and download limits use MiB; displayed sizes use decimal MB.
 
 ## Integrations
 
@@ -240,7 +295,7 @@ External processes can start turns, for example a reminder scheduler or a proact
 curl -X POST http://127.0.0.1:8080/v1/inject \
   -H "Authorization: Bearer $ROUTER_API__TOKEN" \
   -H 'Content-Type: application/json' \
-  --data '{"route":"pi:default","parts":[{"type":"text","text":"Say good morning."}]}'
+  --data '{"route":"default","parts":[{"type":"text","text":"Say good morning."}]}'
 ```
 
 | Status | Meaning |
@@ -256,8 +311,8 @@ Requests are capped at 1 MiB. Part types are `text`, `image`, `audio` and `file`
 
 The router serves a stateless Streamable HTTP MCP endpoint at `/mcp` (`initialize`, `ping`, `tools/list`, `tools/call`; protocol versions 2025-03-26, 2025-06-18 and 2025-11-25). `send_file` is always available; `send_voice` is opt-in.
 
-- On startup the router atomically merges a reserved `phirouter` entry into `~/.pi/agent/mcp.json`, preserving your other servers. Tokens are stored as environment references, not plaintext.
-- Each backend process gets `PHIROUTER_BACKEND` in its environment, which becomes the `X-PhiRouter-Route` header, so one endpoint serves many backends and files go back to the right chat.
+- Each backend adapter registers the endpoint with its agent. pi: on startup the router atomically merges a reserved `phirouter` entry into the agent directory's `mcp.json`, preserving your other servers, with tokens stored as environment references, not plaintext. ACP: the endpoint and its headers are passed in `session/new` / `session/load`.
+- Every request carries the backend instance name in the `X-PhiRouter-Route` header (for pi via `PHIROUTER_BACKEND`), so one endpoint serves many backends and files go back to the right chat.
 - The MCP token is separate from the injection token. Cross-origin requests are rejected. Paths are opened through Go's `os.Root`, so traversal and escaping symlinks are refused.
 
 #### `send_file`
@@ -312,7 +367,7 @@ Provider errors (bad key, unknown voice) are returned to the agent as tool error
 Inspect the connection inside the container:
 
 ```sh
-docker compose exec -e PHIROUTER_BACKEND=pi:default router pi mcp list
+docker compose exec -e PHIROUTER_BACKEND=default router pi mcp list
 ```
 
 ### Plugins
@@ -327,7 +382,7 @@ plugins:
     prefix: "Reply briefly."
   - type: ticker          # inject on a fixed interval from startup (not a calendar)
     interval: 24h
-    route: pi:default
+    route: default
     text: "Check whether the user needs a daily reminder."
 ```
 
@@ -335,7 +390,7 @@ plugins:
 
 1. Create a package under `adapters/frontend/` that imports only `internal/core`, and implement `core.Frontend`:
    - `Run` reports inbound messages with a bare address in `Source`, and the platform message reference in `ReplyRef` if replies can be attached to it.
-   - `Send` enforces platform limits (message length, media types). Outbound envelopes carry the latest inbound `ReplyRef` for the conversation. When platform rules refuse a delivery (a closed messaging window, no unsolicited messages), wrap `core.ErrSendNotAllowed`; the router reports it to hooks as a `send_not_allowed` event and to the caller (for example the agent's `send_file`) instead of treating it as a transport failure.
+   - `Send` enforces platform limits (message length, media types). Outbound envelopes carry the latest inbound `ReplyRef` for the conversation. When platform rules refuse a delivery (a closed messaging window, no unsolicited messages), wrap `core.ErrSendNotAllowed`; the router reports it to hooks as an `EventDeliveryRefused` event and to the caller (for example the agent's `send_file`) instead of treating it as a transport failure.
    - `Typing` may be a no-op; `Dialog` should degrade (for example to numbered text) when the platform lacks buttons or reply prompts.
    - Implement `core.IngressFrontend` (`Ingress() http.Handler`) if the platform delivers events by webhook, and verify its signatures there.
 2. Export an options struct with `yaml` tags and defaults (optionally with a `Validate() error` method), and an address validator.
@@ -343,17 +398,27 @@ plugins:
 
 `internal/core`, `internal/router` and `internal/config` need no changes.
 
+## Adding a backend
+
+1. Create a package under `adapters/backend/` that imports only `internal/core`, and implement `core.Backend`:
+   - `Capabilities` declares what the router may ask: `Steer` and `FollowUp` for prompts while busy, `Models`, `NewSession`. The router holds prompts itself when neither delivery mode is available and refuses commands for missing features; runtime gaps return `core.ErrUnsupported`.
+   - `Run` supervises the agent and emits events in order: `EventReady` when prompts are accepted, `EventTurnStarted` / `EventTurnEnded` around work, `EventMessageChunk` for reply text, `EventToolCall`, `EventDialog`, `EventNotice`, `EventError`, `EventRestarting`. Anything else goes out as `EventExtension` with the record in `Raw`.
+   - `Prompt` returns once the prompt is accepted; it must not wait for the turn.
+   - Register `core.ToolServer` (URL, token and route header) with the agent so it can call `send_file` and `send_voice`.
+2. Export an options struct with `yaml` tags and defaults (optionally with a `Validate() error` method).
+3. Add one entry to `backendTypes` in `cmd/router/backends.go`. It receives the instance name, a private state directory, the tool server and the media store.
+
 ## Reliability and limits
 
-- **Supervision**: pi exits trigger exponential restart backoff (1–60 s, reset after a minute of stable runtime).
-- **Sessions**: the active session pointer is captured on startup, agent start/settle, `/new` and `/restart`, then atomically persisted per backend. A failed restore is surfaced and retried, never silently replaced with a new conversation. An explicit `session_file` overrides the pointer.
-- **Replay**: messages received during recovery are replayed FIFO within user/plugin priority. Work pi already accepted is **not** replayed after a crash, because tools may already have run; use `/retry` deliberately.
-- **Deadlines**: interactive backend operations have a 20 s caller deadline. A timeout only ends that wait. It does not kill pi or replay, and a command whose write had started may still execute. A single serialized writer per process keeps JSONL records intact; late responses can never satisfy another request.
+- **Supervision**: backend process exits trigger exponential restart backoff (1–60 s, reset after a minute of stable runtime).
+- **Sessions**: pi's active session pointer is captured on startup, agent start/settle, `/new` and `/restart`, then atomically persisted per backend. A failed pi restore is surfaced and retried, never silently replaced with a new conversation; an explicit `session_file` overrides the pointer. ACP sessions are resumed with `session/load`; if the agent cannot load it, a new session starts and the failure is logged.
+- **Replay**: messages received during recovery are replayed FIFO within user/plugin priority. Work a backend already accepted is **not** replayed after a crash, because tools may already have run; use `/retry` deliberately.
+- **Deadlines**: interactive backend operations have a 20 s caller deadline. A timeout only ends that wait. It does not kill the backend or replay, and a command whose write had started may still execute. A single serialized writer per process keeps line-delimited records intact; late responses can never satisfy another request.
 - **Queues**: each backend's recovery queue holds 256 envelopes by default (`queue_limit`) and rejects overflow visibly. Queues are memory-only.
 - **Telegram**: 429 responses honor `retry_after` up to three times; ambiguous network failures are logged rather than retried, to avoid duplicates.
-- **Shutdown**: SIGTERM stops polling and HTTP admission, flushes buffered bubbles, then closes pi's stdin with a bounded wait before killing it. Startup and graceful shutdown send a best-effort notice to the owners listed in `lifecycle_notify`.
+- **Shutdown**: SIGTERM stops polling and HTTP admission, flushes buffered bubbles, then closes each backend's stdin with a bounded wait before killing it. Startup and graceful shutdown send a best-effort notice to the owners listed in `lifecycle_notify`.
 - **No durability guarantees**: there is no database, durable outbox or exactly-once delivery. A lost network response means an uncertain delivery result. Slow frontend calls apply backpressure to dispatch.
-- **Platform rules**: some platforms restrict unsolicited messages (proactive turns, `send_file` outside a conversation). Refusals surface as `send_not_allowed`; the router never retries them.
+- **Platform rules**: some platforms restrict unsolicited messages (proactive turns, `send_file` outside a conversation). Refusals surface to hooks as `EventDeliveryRefused`; the router never retries them.
 - **Non-goals for now**: multiple users per frontend instance, cross-platform identity, config hot reload, outbound plugin subscriptions, web UI.
 
 ## Testing
@@ -363,7 +428,7 @@ make test   # go test ./...  (go test -race ./... additionally needs a C compile
 make vet
 ```
 
-The suite covers scheduling with fake frontends/backends, stream boundaries, recovery with a real JSONL child process, Telegram HTTP and dialog flows against a local fake server (opens loopback sockets), auth, MCP delivery, path confinement, config layering and adapter-typed options, multiple frontend instances, reply references, platform refusals, webhook dispatch, and the package dependency rule. No real Telegram or provider credentials are needed. Audio tests use real ffprobe when available and skip otherwise.
+The suite covers scheduling with fake frontends/backends, stream boundaries, recovery with real JSONL and ACP child processes, capability-based scheduling, Telegram HTTP and dialog flows against a local fake server (opens loopback sockets), auth, MCP delivery, path confinement, config layering and adapter-typed options, multiple frontend instances, reply references, platform refusals, webhook dispatch, and the package dependency rule. No real Telegram or provider credentials are needed. Audio tests use real ffprobe when available and skip otherwise.
 
 Container smoke test, offline and without credentials:
 
@@ -378,7 +443,7 @@ It verifies real pi MCP discovery, bearer auth, path rejection, liveness and gra
 
 ## References
 
-[pi RPC](https://github.com/earendil-works/pi/blob/v1.6.0/packages/coding-agent/docs/rpc.md) · [RPC commands](https://github.com/earendil-works/pi/blob/v1.6.0/packages/coding-agent/docs/rpc-commands.md) · [extension UI](https://github.com/earendil-works/pi/blob/v1.6.0/packages/coding-agent/docs/rpc-extension-ui.md) · [pi MCP configuration](https://github.com/earendil-works/pi/blob/v1.6.0/packages/coding-agent/docs/mcp.md) · [Telegram Bot API](https://core.telegram.org/bots/api) · [MCP Streamable HTTP](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports)
+[pi RPC](https://github.com/earendil-works/pi/blob/v1.6.0/packages/coding-agent/docs/rpc.md) · [RPC commands](https://github.com/earendil-works/pi/blob/v1.6.0/packages/coding-agent/docs/rpc-commands.md) · [extension UI](https://github.com/earendil-works/pi/blob/v1.6.0/packages/coding-agent/docs/rpc-extension-ui.md) · [pi MCP configuration](https://github.com/earendil-works/pi/blob/v1.6.0/packages/coding-agent/docs/mcp.md) · [Agent Client Protocol](https://agentclientprotocol.com/protocol/overview) · [Telegram Bot API](https://core.telegram.org/bots/api) · [MCP Streamable HTTP](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports)
 
 ## License
 

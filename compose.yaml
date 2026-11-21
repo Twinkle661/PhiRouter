@@ -10,6 +10,7 @@ services:
     volumes:
       - pi-agent:/home/node/.pi/agent
       - media:/data/media
+      - state:/data/state
       - ./config.yaml:/app/config.yaml:ro
     # Reachable by other containers on this network, not published to the host.
     expose:
@@ -18,3 +19,4 @@ services:
 volumes:
   pi-agent:
   media:
+  state:

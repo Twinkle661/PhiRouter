@@ -5,7 +5,7 @@ import { randomBytes } from 'node:crypto';
 import assert from 'node:assert/strict';
 const exec = promisify(execFile);
 const token = randomBytes(32).toString('hex');
-const env = { ...process.env, ROUTER_FRONTENDS__TG__OPTIONS__TOKEN: '123:smoke', ROUTER_FRONTENDS__TG__OWNER: '1', ROUTER_API__TOKEN: 'smoke-injection', ROUTER_MCP__TOKEN: token, PHIROUTER_BACKEND: 'pi:default' };
+const env = { ...process.env, ROUTER_FRONTENDS__TG__OPTIONS__TOKEN: '123:smoke', ROUTER_FRONTENDS__TG__OWNER: '1', ROUTER_API__TOKEN: 'smoke-injection', ROUTER_MCP__TOKEN: token, PHIROUTER_BACKEND: 'default' };
 const child = spawn('router', [], { env, stdio: ['ignore', 'pipe', 'pipe'] });
 let logs = '';
 child.stdout.on('data', b => { logs += b; });
@@ -24,7 +24,7 @@ try {
   assert.equal(denied.status, 401);
   const rpc = async (method, params = {}) => {
     const res = await fetch('http://127.0.0.1:8081/mcp', {
-      method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'X-PhiRouter-Route': 'pi:default', Accept: 'application/json, text/event-stream' },
+      method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'X-PhiRouter-Route': 'default', Accept: 'application/json, text/event-stream' },
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
     });
     assert.equal(res.status, 200);

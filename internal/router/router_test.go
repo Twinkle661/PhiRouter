@@ -11,7 +11,10 @@ import (
 	"time"
 )
 
-var fakeRoutes = []Route{{"fake:*", "test:default"}}
+var fakeRoutes = []Route{{"fake:*", "default"}}
+
+// piLike are the capabilities of a backend that steers and queues itself.
+var piLike = core.Capabilities{Steer: true, FollowUp: true, Models: true, NewSession: true}
 var fakeOwners = map[string]string{"fake": "1"}
 
 type fakeFrontend struct {
@@ -53,13 +56,21 @@ type submissionCall struct {
 	Mode     core.DeliveryMode
 }
 type fakeBackend struct {
-	mu    sync.Mutex
-	calls []submissionCall
-	fail  bool
+	mu      sync.Mutex
+	calls   []submissionCall
+	fail    bool
+	caps    *core.Capabilities
+	cancels int
 }
 
+func (f *fakeBackend) Capabilities() core.Capabilities {
+	if f.caps != nil {
+		return *f.caps
+	}
+	return piLike
+}
 func (f *fakeBackend) Run(context.Context, func(core.Event)) error { return nil }
-func (f *fakeBackend) Submit(_ context.Context, e core.Envelope, mode core.DeliveryMode) (core.Submission, error) {
+func (f *fakeBackend) Prompt(_ context.Context, e core.Envelope, mode core.DeliveryMode) (core.Submission, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.fail {
@@ -76,10 +87,15 @@ func (f *fakeBackend) Models(context.Context) ([]core.Model, error) {
 }
 func (f *fakeBackend) SetModel(context.Context, core.Model) error { return nil }
 func (f *fakeBackend) NewSession(context.Context) (bool, error)   { return true, nil }
-func (f *fakeBackend) Abort(context.Context) error                { return nil }
-func (f *fakeBackend) Respond(context.Context, core.Reply) error  { return nil }
-func (f *fakeBackend) Restart(context.Context) error              { return nil }
-func (f *fakeBackend) Close(context.Context) error                { return nil }
+func (f *fakeBackend) Cancel(context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cancels++
+	return nil
+}
+func (f *fakeBackend) Respond(context.Context, core.Reply) error { return nil }
+func (f *fakeBackend) Restart(context.Context) error             { return nil }
+func (f *fakeBackend) Close(context.Context) error               { return nil }
 func (f *fakeBackend) prompts() []submissionCall {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -89,13 +105,13 @@ func setup(t *testing.T) (*Router, *fakeFrontend, *fakeBackend, context.Context)
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	f, b := &fakeFrontend{}, &fakeBackend{}
-	r := New(Options{Routes: fakeRoutes, Owners: fakeOwners, Separators: []string{"\n", "<break />"}, QueueLimit: 4}, map[string]core.Frontend{"fake": f}, map[string]core.Backend{"test:default": b})
+	r := New(Options{Routes: fakeRoutes, Owners: fakeOwners, Separators: []string{"\n", "<break />"}, QueueLimit: 4}, map[string]core.Frontend{"fake": f}, map[string]core.Backend{"default": b})
 	go r.Run(ctx)
 	t.Cleanup(func() { cancel(); <-r.done })
 	return r, f, b, ctx
 }
 func env(text string) core.Envelope {
-	return core.Envelope{Route: "test:default", Source: "fake:1", Parts: []core.Part{{Type: core.PartText, Text: text}}}
+	return core.Envelope{Route: "default", Source: "fake:1", Parts: []core.Part{{Type: core.PartText, Text: text}}}
 }
 func eventually(t *testing.T, fn func() bool) {
 	t.Helper()
@@ -121,22 +137,22 @@ func TestSchedulingAndRecovery(t *testing.T) {
 	if err := r.Inbound(ctx, env("user2")); err != nil {
 		t.Fatal(err)
 	}
-	r.Event(ctx, "test:default", core.Event{Type: "ready"})
+	r.Event(ctx, "default", core.Event{Kind: core.EventReady})
 	eventually(t, func() bool { return len(b.prompts()) == 4 })
 	calls := b.prompts()
 	want := []string{"user1", "user2", "plugin1", "plugin2"}
-	kinds := []core.DeliveryMode{core.DeliveryStart, core.DeliveryInterrupt, core.DeliveryQueue, core.DeliveryQueue}
+	kinds := []core.DeliveryMode{core.DeliveryPrompt, core.DeliverySteer, core.DeliveryFollowUp, core.DeliveryFollowUp}
 	for i, c := range calls {
 		if c.Mode != kinds[i] || c.Envelope.Parts[0].Text != want[i] {
 			t.Fatalf("call %d: %+v", i, c)
 		}
 	}
-	// agent_end alone must not make pi idle while follow-ups remain.
-	r.Event(ctx, "test:default", core.Event{Type: "agent_end"})
+	// The end of a message alone must not make the backend idle.
+	r.Event(ctx, "default", core.Event{Kind: core.EventMessageEnd})
 	if err := r.Inbound(ctx, env("interrupt")); err != nil {
 		t.Fatal(err)
 	}
-	if got := b.prompts()[4].Mode; got != core.DeliveryInterrupt {
+	if got := b.prompts()[4].Mode; got != core.DeliverySteer {
 		t.Fatal(got)
 	}
 }
@@ -160,12 +176,12 @@ func TestBubbleBoundaries(t *testing.T) {
 }
 func TestShutdownFlushes(t *testing.T) {
 	r, f, _, ctx := setup(t)
-	r.Event(ctx, "test:default", core.Event{Type: "message_update", Text: "first\nsecond"})
+	r.Event(ctx, "default", core.Event{Kind: core.EventMessageChunk, Text: "first\nsecond"})
 	eventually(t, func() bool { f.mu.Lock(); defer f.mu.Unlock(); return len(f.texts) == 1 })
 	if err := r.Send(ctx, env("media")); err != nil {
 		t.Fatal(err)
 	}
-	r.Event(ctx, "test:default", core.Event{Type: "message_end"})
+	r.Event(ctx, "default", core.Event{Kind: core.EventMessageEnd})
 	eventually(t, func() bool {
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -186,7 +202,7 @@ func (badHook) OnEvent(context.Context, string, core.Event) error { return nil }
 func TestHookFailureDoesNotChangeMessage(t *testing.T) {
 	r, _, b, ctx := setup(t)
 	r.opt.Hooks = []core.Hook{badHook{}}
-	r.Event(ctx, "test:default", core.Event{Type: "ready"})
+	r.Event(ctx, "default", core.Event{Kind: core.EventReady})
 	if err := r.Inbound(ctx, env("original")); err != nil {
 		t.Fatal(err)
 	}
@@ -213,14 +229,14 @@ func TestQueueLimitAndUnknownRoute(t *testing.T) {
 }
 func TestUnknownSlashPreservesChannelPriorityWhenBusy(t *testing.T) {
 	r, _, b, ctx := setup(t)
-	r.Event(ctx, "test:default", core.Event{Type: "ready"})
+	r.Event(ctx, "default", core.Event{Kind: core.EventReady})
 	_ = r.Inbound(ctx, env("hello"))
 	eventually(t, func() bool { return len(b.prompts()) == 1 })
 	if err := r.Inbound(ctx, env("/extension")); err != nil {
 		t.Fatal(err)
 	}
 	c := b.prompts()[1]
-	if c.Mode != core.DeliveryInterrupt || c.Envelope.Parts[0].Text != "/extension" {
+	if c.Mode != core.DeliverySteer || c.Envelope.Parts[0].Text != "/extension" {
 		t.Fatal(c)
 	}
 }
@@ -228,9 +244,9 @@ func TestUnknownSlashPreservesChannelPriorityWhenBusy(t *testing.T) {
 func TestGracefulShutdownActuallyFlushes(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	f, b := &fakeFrontend{}, &fakeBackend{}
-	r := New(Options{Routes: fakeRoutes, Owners: fakeOwners}, map[string]core.Frontend{"fake": f}, map[string]core.Backend{"test:default": b})
+	r := New(Options{Routes: fakeRoutes, Owners: fakeOwners}, map[string]core.Frontend{"fake": f}, map[string]core.Backend{"default": b})
 	go r.Run(ctx)
-	r.Event(ctx, "test:default", core.Event{Type: "message_update", Text: "unfinished bubble"})
+	r.Event(ctx, "default", core.Event{Kind: core.EventMessageChunk, Text: "unfinished bubble"})
 	// A status request is a barrier after the queued event is observed.
 	eventually(t, func() bool { return len(r.events) == 0 })
 	cancel()
@@ -255,18 +271,18 @@ func TestToolOutputPostsStartsAndFailures(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f, b := &fakeFrontend{}, &fakeBackend{}
 			tc.opt.Routes, tc.opt.Owners = fakeRoutes, fakeOwners
-			r := New(tc.opt, map[string]core.Frontend{"fake": f}, map[string]core.Backend{"test:default": b})
-			events := []core.Event{{Type: "tool_execution_start", Data: []byte(`{"secret":"argument"}`), Tool: &core.ToolEvent{Name: "bash", Phase: core.ToolStarted, Detail: "git \n status"}}}
+			r := New(tc.opt, map[string]core.Frontend{"fake": f}, map[string]core.Backend{"default": b})
+			events := []core.Event{{Kind: core.EventToolCall, Raw: []byte(`{"secret":"argument"}`), Tool: &core.ToolCall{Title: "bash", Status: core.ToolInProgress, Detail: "git \n status"}}}
 			for i := 0; i < 100; i++ {
-				events = append(events, core.Event{Type: "tool_execution_update", Data: []byte(`{"partialResult":"large secret output"}`)})
+				events = append(events, core.Event{Kind: core.EventExtension, Raw: []byte(`{"partialResult":"large secret output"}`)})
 			}
 			events = append(events,
-				core.Event{Type: "tool_execution_end", Data: []byte(`{"result":"secret"}`), Tool: &core.ToolEvent{Name: "bash", Phase: core.ToolFinished, Failed: true, Duration: time.Second}},
-				core.Event{Type: "tool_execution_start", Tool: &core.ToolEvent{Name: "read", Phase: core.ToolStarted, Detail: "0123456789abcdef"}},
-				core.Event{Type: "tool_execution_end", Data: []byte(`{"result":"secret"}`), Tool: &core.ToolEvent{Name: "read", Phase: core.ToolFinished, Duration: 40 * time.Millisecond}},
+				core.Event{Kind: core.EventToolCall, Raw: []byte(`{"result":"secret"}`), Tool: &core.ToolCall{Title: "bash", Status: core.ToolFailed, Duration: time.Second}},
+				core.Event{Kind: core.EventToolCall, Tool: &core.ToolCall{Title: "read", Status: core.ToolInProgress, Detail: "0123456789abcdef"}},
+				core.Event{Kind: core.EventToolCall, Raw: []byte(`{"result":"secret"}`), Tool: &core.ToolCall{Title: "read", Status: core.ToolCompleted, Duration: 40 * time.Millisecond}},
 			)
 			for _, e := range events {
-				r.event(context.Background(), "test:default", r.states["test:default"], e)
+				r.event(context.Background(), "default", r.states["default"], e)
 			}
 			if got := strings.Join(f.texts, "|"); got != tc.want {
 				t.Fatalf("unexpected tool output: %q", got)
@@ -280,11 +296,11 @@ func TestToolOutputPostsStartsAndFailures(t *testing.T) {
 
 func TestSessionCommandsShowDetails(t *testing.T) {
 	f, b := &fakeFrontend{}, &fakeBackend{}
-	r := New(Options{Routes: fakeRoutes, Owners: fakeOwners}, map[string]core.Frontend{"fake": f}, map[string]core.Backend{"test:default": b})
-	s := r.states["test:default"]
+	r := New(Options{Routes: fakeRoutes, Owners: fakeOwners}, map[string]core.Frontend{"fake": f}, map[string]core.Backend{"default": b})
+	s := r.states["default"]
 	s.ready = true
 	for _, command := range []string{"/new session", "/status"} {
-		handled, err := r.command(context.Background(), "test:default", s, env(command))
+		handled, err := r.command(context.Background(), "default", s, env(command))
 		if err != nil || !handled {
 			t.Fatalf("%s: %v", command, err)
 		}
@@ -294,5 +310,109 @@ func TestSessionCommandsShowDetails(t *testing.T) {
 				t.Fatalf("missing %q in %q", detail, text)
 			}
 		}
+	}
+}
+
+func TestBusyBackendWithoutSteerHoldsMessages(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		policy  BusyPolicy
+		cancels int
+	}{{"queue", BusyQueue, 0}, {"interrupt", BusyInterrupt, 1}} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			f, b := &fakeFrontend{}, &fakeBackend{caps: &core.Capabilities{}}
+			r := New(Options{Routes: fakeRoutes, Owners: fakeOwners, QueueLimit: 8, BusyPolicy: map[string]BusyPolicy{"default": tc.policy}}, map[string]core.Frontend{"fake": f}, map[string]core.Backend{"default": b})
+			s := r.states["default"]
+			r.event(ctx, "default", s, core.Event{Kind: core.EventReady})
+			for _, text := range []string{"first", "second", "third"} {
+				if err := r.accept(ctx, func() core.Envelope { e := env(text); e.Channel = true; return e }()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := r.accept(ctx, env("plugin")); err != nil {
+				t.Fatal(err)
+			}
+			if got := len(b.prompts()); got != 1 || len(s.queue) != 3 || b.cancels != tc.cancels {
+				t.Fatalf("prompts %d, held %d, cancels %d", got, len(s.queue), b.cancels)
+			}
+			// Each turn end releases exactly one held prompt, users first.
+			var order []string
+			for i := 0; i < 3; i++ {
+				r.event(ctx, "default", s, core.Event{Kind: core.EventTurnEnded})
+				calls := b.prompts()
+				c := calls[len(calls)-1]
+				if c.Mode != core.DeliveryPrompt {
+					t.Fatalf("mode %d", c.Mode)
+				}
+				order = append(order, c.Envelope.Parts[0].Text)
+			}
+			if got := strings.Join(order, ","); got != "second,third,plugin" {
+				t.Fatal(got)
+			}
+			// Released prompts neither cancel their own turn nor re-notify.
+			queued := 0
+			for _, text := range f.texts {
+				if strings.Contains(text, "queued") || strings.Contains(text, "Stopping") {
+					queued++
+				}
+			}
+			if b.cancels != tc.cancels || queued != 2 {
+				t.Fatalf("cancels %d, notices %d: %v", b.cancels, queued, f.texts)
+			}
+		})
+	}
+}
+
+func TestFollowUpOnlyBackendQueuesUserMessagesThere(t *testing.T) {
+	ctx := context.Background()
+	b := &fakeBackend{caps: &core.Capabilities{FollowUp: true}}
+	r := New(Options{Routes: fakeRoutes, Owners: fakeOwners, QueueLimit: 8}, map[string]core.Frontend{"fake": &fakeFrontend{}}, map[string]core.Backend{"default": b})
+	s := r.states["default"]
+	r.event(ctx, "default", s, core.Event{Kind: core.EventReady})
+	for _, text := range []string{"first", "second"} {
+		e := env(text)
+		e.Channel = true
+		if err := r.accept(ctx, e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls := b.prompts(); len(calls) != 2 || calls[1].Mode != core.DeliveryFollowUp {
+		t.Fatalf("%+v", calls)
+	}
+}
+
+func TestUnsupportedCommandsAndBareModels(t *testing.T) {
+	ctx := context.Background()
+	f, b := &fakeFrontend{}, &fakeBackend{caps: &core.Capabilities{}}
+	r := New(Options{Routes: fakeRoutes, Owners: fakeOwners}, map[string]core.Frontend{"fake": f}, map[string]core.Backend{"default": b})
+	s := r.states["default"]
+	s.ready = true
+	for _, command := range []string{"/new", "/model"} {
+		if _, err := r.command(ctx, "default", s, env(command)); !errors.Is(err, core.ErrUnsupported) {
+			t.Fatalf("%s: %v", command, err)
+		}
+	}
+	for value, want := range map[string]core.Model{"sonnet": {ID: "sonnet"}, "openrouter/anthropic/x": {Provider: "openrouter", ID: "anthropic/x"}} {
+		got, err := parseModel(value)
+		if err != nil || got != want || got.String() != value {
+			t.Fatalf("%s: %+v %v", value, got, err)
+		}
+	}
+	if _, err := parseModel("/x"); err == nil {
+		t.Fatal("empty provider accepted")
+	}
+}
+
+func TestDialogEventsReachTheFrontend(t *testing.T) {
+	ctx := context.Background()
+	f, b := &fakeFrontend{}, &fakeBackend{}
+	r := New(Options{Routes: fakeRoutes, Owners: fakeOwners}, map[string]core.Frontend{"fake": f}, map[string]core.Backend{"default": b})
+	d := core.Dialog{ID: "p1", Title: "Run rm?", Options: []core.Option{{ID: "allow", Label: "Allow", Kind: core.OptionAllowOnce}, {ID: "reject", Label: "Reject", Kind: core.OptionRejectOnce}}}
+	r.event(ctx, "default", r.states["default"], core.Event{Kind: core.EventDialog, Dialog: &d})
+	r.event(ctx, "default", r.states["default"], core.Event{Kind: core.EventNotice, Text: "heads up"})
+	if len(f.dialogs) != 1 || f.dialogs[0].Options[1].ID != "reject" || len(f.texts) != 1 || f.texts[0] != "heads up" {
+		t.Fatalf("%+v %v", f.dialogs, f.texts)
 	}
 }

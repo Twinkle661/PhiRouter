@@ -38,8 +38,8 @@ func TestTimestampFormattingAndMedia(t *testing.T) {
 func TestTimestampAcceptanceQueueRecoveryAndRetry(t *testing.T) {
 	ctx := context.Background()
 	b, f := &fakeBackend{}, &fakeFrontend{}
-	r := New(Options{Routes: []Route{{"fake:*", "test:default"}}, Timestamp: TimestampOptions{Enabled: true, Format: "[2006-01-02T15:04:05.000000000Z07:00] "}}, map[string]core.Frontend{"fake": f}, map[string]core.Backend{"test:default": b})
-	s := r.states["test:default"]
+	r := New(Options{Routes: []Route{{"fake:*", "default"}}, Timestamp: TimestampOptions{Enabled: true, Format: "[2006-01-02T15:04:05.000000000Z07:00] "}}, map[string]core.Frontend{"fake": f}, map[string]core.Backend{"default": b})
+	s := r.states["default"]
 	user := env("hello")
 	user.Channel = true
 	if err := r.accept(ctx, user); err != nil {
@@ -49,7 +49,7 @@ func TestTimestampAcceptanceQueueRecoveryAndRetry(t *testing.T) {
 	if stamped == "hello" {
 		t.Fatal("queued message missing timestamp")
 	}
-	r.event(ctx, "test:default", s, core.Event{Type: "ready"})
+	r.event(ctx, "default", s, core.Event{Kind: core.EventReady})
 	retry := env("/retry")
 	retry.Channel = true
 	if err := r.accept(ctx, retry); err != nil {
@@ -60,7 +60,7 @@ func TestTimestampAcceptanceQueueRecoveryAndRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	b.fail = false
-	r.event(ctx, "test:default", s, core.Event{Type: "ready"})
+	r.event(ctx, "default", s, core.Event{Kind: core.EventReady})
 	for _, call := range b.prompts() {
 		if call.Envelope.Parts[0].Text != stamped {
 			t.Fatalf("timestamp changed on retry: %+v", call)
@@ -95,8 +95,8 @@ func TestTimestampAcceptanceQueueRecoveryAndRetry(t *testing.T) {
 func TestTimestampUsesSendTimeAndSkipsSlashCommands(t *testing.T) {
 	ctx := context.Background()
 	b, f := &fakeBackend{}, &fakeFrontend{}
-	r := New(Options{Routes: []Route{{"fake:*", "test:default"}}, Timestamp: TimestampOptions{Enabled: true, Format: "[15:04] "}}, map[string]core.Frontend{"fake": f}, map[string]core.Backend{"test:default": b})
-	r.event(ctx, "test:default", r.states["test:default"], core.Event{Type: "ready"})
+	r := New(Options{Routes: []Route{{"fake:*", "default"}}, Timestamp: TimestampOptions{Enabled: true, Format: "[15:04] "}}, map[string]core.Frontend{"fake": f}, map[string]core.Backend{"default": b})
+	r.event(ctx, "default", r.states["default"], core.Event{Kind: core.EventReady})
 	sent := env("backlog")
 	sent.Channel = true
 	sent.Time = time.Date(2026, 11, 21, 3, 15, 0, 0, time.UTC)

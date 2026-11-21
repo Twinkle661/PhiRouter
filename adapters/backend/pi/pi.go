@@ -21,6 +21,100 @@ import (
 	"time"
 )
 
+// Config is the pi backend's options block in the router configuration.
+type Config struct {
+	Command []string `yaml:"command"`
+	// SessionFile pins a pi session file; empty resumes the last session.
+	SessionFile string `yaml:"session_file"`
+	// AgentDir is pi's agent directory. Empty means ~/.pi/agent; anything
+	// else is also passed to pi as PI_CODING_AGENT_DIR.
+	AgentDir string `yaml:"agent_dir"`
+	// Attachment is the text line describing each attached file.
+	Attachment string `yaml:"attachment"`
+	// InlineImageMaxMB caps images sent inline to the model; 0 disables.
+	InlineImageMaxMB int64 `yaml:"inline_image_max_mb"`
+}
+
+func DefaultConfig() *Config {
+	return &Config{Command: []string{"pi", "--mode", "rpc"}, Attachment: "[attachment: {path} ({mime}, {size})]", InlineImageMaxMB: 5}
+}
+func (c *Config) Validate() error {
+	if len(c.Command) == 0 || c.Command[0] == "" {
+		return errors.New("command is required")
+	}
+	if c.InlineImageMaxMB < 0 || c.InlineImageMaxMB > 5 {
+		return errors.New("inline_image_max_mb must be between 0 and 5")
+	}
+	return nil
+}
+
+// ResolveAgentDir returns the agent directory pi will use for c.
+func (c *Config) ResolveAgentDir() (string, error) {
+	if c.AgentDir != "" {
+		return c.AgentDir, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".pi", "agent"), nil
+}
+
+// FromConfig builds a backend for instance name. It registers the router's
+// tool server in the agent directory's mcp.json (read by pi-mcp-adapter);
+// the token reaches pi through the environment, never the file.
+func FromConfig(name string, c *Config, tools core.ToolServer, media core.MediaStore) (*Backend, error) {
+	dir, err := c.ResolveAgentDir()
+	if err != nil {
+		return nil, err
+	}
+	if err = os.MkdirAll(dir, 0700); err != nil {
+		return nil, err
+	}
+	if err = RegisterMCP(filepath.Join(dir, "mcp.json"), tools.URL); err != nil {
+		return nil, err
+	}
+	env := []string{"ROUTER_MCP__TOKEN=" + tools.Token, "PHIROUTER_BACKEND=" + tools.Route}
+	if c.AgentDir != "" {
+		env = append(env, "PI_CODING_AGENT_DIR="+c.AgentDir)
+	}
+	return New(Options{Command: c.Command, Env: env, StatePath: filepath.Join(dir, "phirouter-"+name+".session"), SessionFile: c.SessionFile, Attachment: c.Attachment, InlineMax: c.InlineImageMaxMB * 1024 * 1024, Media: media}), nil
+}
+
+// RegisterMCP adds the phirouter entry to an mcp.json, keeping other entries.
+func RegisterMCP(path, endpoint string) error {
+	config := map[string]any{}
+	raw, err := os.ReadFile(path)
+	if err == nil {
+		if err = json.Unmarshal(raw, &config); err != nil {
+			return fmt.Errorf("invalid existing mcp.json: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if config == nil {
+		return fmt.Errorf("mcp.json must contain an object")
+	}
+	servers, ok := config["mcpServers"].(map[string]any)
+	if !ok && config["mcpServers"] != nil {
+		return fmt.Errorf("mcpServers must be an object")
+	}
+	if servers == nil {
+		servers = map[string]any{}
+	}
+	servers["phirouter"] = map[string]any{"type": "http", "url": endpoint, "headers": map[string]string{"Authorization": "Bearer ${ROUTER_MCP__TOKEN}", core.RouteHeader: "${PHIROUTER_BACKEND}"}}
+	config["mcpServers"] = servers
+	raw, err = json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := path + ".phirouter.tmp"
+	if err = os.WriteFile(tmp, append(raw, '\n'), 0600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 type Options struct {
 	Command                            []string
 	Env                                []string
@@ -39,6 +133,8 @@ type Backend struct {
 	session string
 	ready   bool
 	exited  chan struct{}
+	// dialogs remembers the pi method of each open dialog, to answer in kind.
+	dialogs map[string]string
 }
 type response struct {
 	Data json.RawMessage
@@ -46,7 +142,7 @@ type response struct {
 }
 
 func New(o Options) *Backend {
-	return &Backend{opt: o, pending: map[string]chan response{}, session: o.SessionFile}
+	return &Backend{opt: o, pending: map[string]chan response{}, session: o.SessionFile, dialogs: map[string]string{}}
 }
 
 type writeRequest struct {
@@ -138,20 +234,26 @@ func (b *Backend) rpc(ctx context.Context, kind string, fields map[string]any) (
 	}
 }
 
-func (b *Backend) Submit(ctx context.Context, e core.Envelope, mode core.DeliveryMode) (core.Submission, error) {
+// Capabilities: pi steers running turns and queues follow-ups itself.
+func (b *Backend) Capabilities() core.Capabilities {
+	return core.Capabilities{Steer: true, FollowUp: true, Models: true, NewSession: true}
+}
+func (b *Backend) Prompt(ctx context.Context, e core.Envelope, mode core.DeliveryMode) (core.Submission, error) {
 	message, images, err := b.prompt(e)
 	if err != nil {
 		return core.Submission{}, err
 	}
 	behavior := "followUp"
 	switch mode {
-	case core.DeliveryStart:
+	case core.DeliveryPrompt:
+		// pi ignores the behavior when idle; steer keeps a racing user
+		// message ahead of queued injections.
 		if e.Channel {
 			behavior = "steer"
 		}
-	case core.DeliveryInterrupt:
+	case core.DeliverySteer:
 		behavior = "steer"
-	case core.DeliveryQueue:
+	case core.DeliveryFollowUp:
 		if strings.HasPrefix(strings.TrimSpace(message), "/") {
 			return core.Submission{}, errors.New("plugin slash commands cannot be queued while the backend is busy")
 		}
@@ -197,6 +299,9 @@ func (b *Backend) Models(ctx context.Context) ([]core.Model, error) {
 	return result.Models, err
 }
 func (b *Backend) SetModel(ctx context.Context, m core.Model) error {
+	if m.Provider == "" || m.ID == "" {
+		return errors.New("use /model provider/model-id")
+	}
 	_, err := b.rpc(ctx, "set_model", map[string]any{"provider": m.Provider, "modelId": m.ID})
 	return err
 }
@@ -211,16 +316,51 @@ func (b *Backend) NewSession(ctx context.Context) (bool, error) {
 	}
 	return !result.Cancelled, nil
 }
-func (b *Backend) Abort(ctx context.Context) error {
+func (b *Backend) Cancel(ctx context.Context) error {
 	if _, err := b.rpc(ctx, "clear_queue", nil); err != nil {
 		return err
 	}
 	_, err := b.rpc(ctx, "abort", nil)
 	return err
 }
+
+// Respond answers an extension UI request in the shape its method expects.
 func (b *Backend) Respond(ctx context.Context, r core.Reply) error {
-	_, err := b.rpc(ctx, "extension_ui_response", map[string]any{"id": r.ID, "value": r.Value, "confirmed": r.Confirmed, "cancelled": r.Cancelled})
+	b.mu.Lock()
+	method := b.dialogs[r.ID]
+	delete(b.dialogs, r.ID)
+	b.mu.Unlock()
+	fields := map[string]any{"id": r.ID, "cancelled": r.Cancelled}
+	switch method {
+	case "confirm":
+		fields["confirmed"] = !r.Cancelled && r.OptionID == confirmYes
+	case "input", "editor":
+		fields["value"] = r.Text
+	default:
+		fields["value"] = r.OptionID
+	}
+	_, err := b.rpc(ctx, "extension_ui_response", fields)
 	return err
+}
+
+const confirmYes, confirmNo = "yes", "no"
+
+// dialog translates a pi extension UI request. Option IDs of select dialogs
+// are pi's option strings, so the answer is the chosen string.
+func dialog(id, method, title, message, prefill string, options []string, timeoutMS int64) core.Dialog {
+	d := core.Dialog{ID: id, Title: title, Message: message, Prefill: prefill, Timeout: time.Duration(timeoutMS) * time.Millisecond}
+	switch method {
+	case "confirm":
+		d.Options = []core.Option{{ID: confirmYes, Label: "Yes", Kind: core.OptionAllowOnce}, {ID: confirmNo, Label: "No", Kind: core.OptionRejectOnce}}
+	case "input", "editor":
+		d.Kind = core.DialogInput
+		d.Multiline = method == "editor"
+	default:
+		for _, o := range options {
+			d.Options = append(d.Options, core.Option{ID: o, Label: o})
+		}
+	}
+	return d
 }
 
 func (b *Backend) prompt(e core.Envelope) (string, []map[string]string, error) {
@@ -345,7 +485,7 @@ func (b *Backend) Run(ctx context.Context, emit func(core.Event)) error {
 				b.mu.Lock()
 				b.ready = true
 				b.mu.Unlock()
-				publish(core.Event{Type: "ready"})
+				publish(core.Event{Kind: core.EventReady})
 				select {
 				case err = <-wait:
 				case <-ctx.Done():
@@ -363,6 +503,7 @@ func (b *Backend) Run(ctx context.Context, emit func(core.Event)) error {
 			b.stdin = nil
 			b.cmd = nil
 			b.ready = false
+			b.dialogs = map[string]string{} // unanswered requests died with the process
 			for _, ch := range b.pending {
 				select {
 				case ch <- response{Err: core.ErrUnavailable}:
@@ -381,7 +522,7 @@ func (b *Backend) Run(ctx context.Context, emit func(core.Event)) error {
 			delay = time.Second
 			attempt = 1
 		}
-		publish(core.Event{Type: "restarting", Text: fmt.Sprintf("Backend crashed, restarting (attempt %d): %v", attempt, err)})
+		publish(core.Event{Kind: core.EventRestarting, Text: fmt.Sprintf("Backend crashed, restarting (attempt %d): %v", attempt, err)})
 		timer := time.NewTimer(delay)
 		select {
 		case <-timer.C:
@@ -426,7 +567,7 @@ func (b *Backend) record(line []byte, emit func(core.Event)) {
 		Message               json.RawMessage
 	}
 	if err := json.Unmarshal(line, &m); err != nil {
-		emit(core.Event{Type: "error", Text: "Invalid JSON from backend"})
+		emit(core.Event{Kind: core.EventError, Text: "Invalid JSON from backend"})
 		return
 	}
 	if m.Type == "response" {
@@ -438,7 +579,7 @@ func (b *Backend) record(line []byte, emit func(core.Event)) {
 				b.mu.Unlock()
 				if b.opt.StatePath != "" {
 					if err := b.persist(state.SessionFile); err != nil {
-						emit(core.Event{Type: "error", Text: fmt.Sprintf("Save session: %v", err)})
+						emit(core.Event{Kind: core.EventError, Text: fmt.Sprintf("Save session: %v", err)})
 					}
 				}
 			}
@@ -458,33 +599,59 @@ func (b *Backend) record(line []byte, emit func(core.Event)) {
 		}
 		return
 	}
-	e := core.Event{Type: m.Type, Data: append(json.RawMessage(nil), line...)}
-	if m.Type == "message_update" && m.AssistantMessageEvent.Type == "text_delta" {
-		e.Text = m.AssistantMessageEvent.Delta
-	}
-	if m.Type == "extension_ui_request" {
+	// Each pi record becomes one event; records without router meaning are
+	// passed through as extensions so hooks still observe them.
+	e := core.Event{Kind: core.EventExtension, Raw: append(json.RawMessage(nil), line...)}
+	switch m.Type {
+	case "agent_start":
+		e.Kind = core.EventTurnStarted
+		go b.refreshState(emit)
+	case "agent_settled":
+		e.Kind, e.StopReason = core.EventTurnEnded, core.StopEndTurn
+		go b.refreshState(emit)
+	case "message_update":
+		if m.AssistantMessageEvent.Type == "text_delta" {
+			e.Kind, e.Text = core.EventMessageChunk, m.AssistantMessageEvent.Delta
+		}
+	case "message_end", "agent_end":
+		e.Kind = core.EventMessageEnd
+	case "extension_ui_request":
 		var d struct {
 			ID, Method, Title, Message, Prefill string
 			Options                             []string
 			Timeout                             int64
 		}
 		if err := json.Unmarshal(line, &d); err != nil {
-			emit(core.Event{Type: "error", Text: "Invalid extension UI request"})
+			emit(core.Event{Kind: core.EventError, Text: "Invalid extension UI request"})
 			return
 		}
-		e.Dialog = &core.Dialog{ID: d.ID, Method: d.Method, Title: d.Title, Message: d.Message, Prefill: d.Prefill, Options: d.Options, TimeoutMS: d.Timeout}
-	}
-	if m.Type == "tool_execution_start" || m.Type == "tool_execution_end" {
+		switch d.Method {
+		case "notify":
+			e.Kind, e.Text = core.EventNotice, d.Message
+		case "select", "confirm", "input", "editor":
+			dlg := dialog(d.ID, d.Method, d.Title, d.Message, d.Prefill, d.Options, d.Timeout)
+			b.mu.Lock()
+			b.dialogs[d.ID] = d.Method
+			b.mu.Unlock()
+			e.Kind, e.Dialog = core.EventDialog, &dlg
+		}
+	case "tool_execution_start", "tool_execution_end":
 		var tool struct {
+			ToolCallID string
 			ToolName   string
 			Args       json.RawMessage
 			IsError    bool
 			DurationMS float64
 		}
 		if json.Unmarshal(line, &tool) == nil {
-			e.Tool = &core.ToolEvent{Name: tool.ToolName, Phase: core.ToolStarted, Detail: toolDetail(tool.Args)}
+			e.Kind = core.EventToolCall
+			e.Tool = &core.ToolCall{ID: tool.ToolCallID, Title: tool.ToolName, Status: core.ToolInProgress, Detail: toolDetail(tool.Args)}
 			if m.Type == "tool_execution_end" {
-				e.Tool = &core.ToolEvent{Name: tool.ToolName, Phase: core.ToolFinished, Failed: tool.IsError, Duration: time.Duration(tool.DurationMS * float64(time.Millisecond))}
+				status := core.ToolCompleted
+				if tool.IsError {
+					status = core.ToolFailed
+				}
+				e.Tool = &core.ToolCall{ID: tool.ToolCallID, Title: tool.ToolName, Status: status, Duration: time.Duration(tool.DurationMS * float64(time.Millisecond))}
 			}
 		}
 	}
@@ -492,8 +659,19 @@ func (b *Backend) record(line []byte, emit func(core.Event)) {
 	if m.Type == "message_end" {
 		var msg struct{ ErrorMessage string }
 		if json.Unmarshal(m.Message, &msg) == nil && msg.ErrorMessage != "" {
-			emit(core.Event{Type: "error", Text: msg.ErrorMessage})
+			emit(core.Event{Kind: core.EventError, Text: msg.ErrorMessage})
 		}
+	}
+}
+
+// refreshState asks pi for its state after turn boundaries, which also
+// persists a newly created session file. It runs off the reader goroutine
+// because the response arrives through it.
+func (b *Backend) refreshState(emit func(core.Event)) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if _, err := b.Status(ctx); err != nil && !errors.Is(err, core.ErrUnavailable) {
+		emit(core.Event{Kind: core.EventError, Text: err.Error()})
 	}
 }
 
