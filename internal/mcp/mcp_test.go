@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"github.com/Twinkle661/PhiRouter/internal/core"
 	"github.com/Twinkle661/PhiRouter/internal/media"
+	"github.com/Twinkle661/PhiRouter/internal/tools/sendfile"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -21,13 +22,13 @@ func TestMCPProtocolAndFiles(t *testing.T) {
 	path := filepath.Join(store.Dir, "out", "report.txt")
 	_ = os.WriteFile(path, []byte("hello"), 0600)
 	sent := 0
-	h := New(Options{Token: "mcp-secret", Route: "pi:default", Media: store, Send: func(_ context.Context, e core.Envelope) error {
+	h := New(Options{Token: "mcp-secret", Route: "pi:default", Tools: []Tool{sendfile.Tool{Media: store, Send: func(_ context.Context, e core.Envelope) error {
 		sent++
 		if e.Parts[0].Path != path || e.Route != "pi:default" {
 			t.Fatal(e)
 		}
 		return nil
-	}})
+	}}}})
 	call := func(body string) map[string]any {
 		t.Helper()
 		r := httptest.NewRequest("POST", "http://127.0.0.1/mcp", strings.NewReader(body))

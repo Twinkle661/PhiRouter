@@ -13,6 +13,7 @@ import (
 	"github.com/Twinkle661/PhiRouter/internal/mcp"
 	"github.com/Twinkle661/PhiRouter/internal/media"
 	"github.com/Twinkle661/PhiRouter/internal/router"
+	"github.com/Twinkle661/PhiRouter/internal/tools/sendfile"
 	"github.com/Twinkle661/PhiRouter/plugins"
 	"log/slog"
 	"net"
@@ -113,7 +114,7 @@ func run() error {
 	for key := range backends {
 		mcpRoutes[key] = true
 	}
-	servers := []*http.Server{{Handler: api.New(c.API.Token, store.Validate, rt.Inject), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 90 * time.Second}, {Handler: mcp.New(mcp.Options{Token: c.MCP.Token, Routes: mcpRoutes, Media: store, Send: rt.Send}), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 90 * time.Second}}
+	servers := []*http.Server{{Handler: api.New(c.API.Token, store.Validate, rt.Inject), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 90 * time.Second}, {Handler: mcp.New(mcp.Options{Token: c.MCP.Token, Routes: mcpRoutes, Tools: []mcp.Tool{sendfile.Tool{Media: store, Send: rt.Send}}}), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 90 * time.Second}}
 	listeners := []net.Listener{apiListener, mcpListener}
 	// The ingress listener only exists when some frontend declares a webhook path.
 	if len(webhooks) > 0 {

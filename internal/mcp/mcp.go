@@ -1,23 +1,37 @@
-// Package mcp implements a stateless Streamable HTTP tool server.
+// Package mcp implements a stateless Streamable HTTP tool server. It owns the
+// protocol (authentication, JSON-RPC, routing headers); the tools themselves
+// are supplied by the composition root.
 package mcp
 
 import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
-	"fmt"
-	"github.com/Twinkle661/PhiRouter/internal/core"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
 )
 
+// Tool is one MCP tool. Implementations live outside this package and need
+// not import it: the interface is satisfied structurally.
+type Tool interface {
+	Name() string
+	Description() string
+	// InputSchema is the JSON Schema of the tool's arguments.
+	InputSchema() map[string]any
+	// Call runs the tool for the backend identified by route. The returned
+	// text is shown to the agent. An error is reported to the agent as a tool
+	// failure, unless it reports InvalidParams() == true, in which case it is
+	// returned as a JSON-RPC invalid-params error.
+	Call(ctx context.Context, route string, args json.RawMessage) (string, error)
+}
+
 type Options struct {
 	Token, Route string
 	Routes       map[string]bool
-	Media        core.MediaStore
-	Send         core.Inject
+	Tools        []Tool
 }
 type request struct {
 	Version string          `json:"jsonrpc"`
@@ -27,6 +41,15 @@ type request struct {
 }
 
 func New(o Options) http.Handler {
+	tools := map[string]Tool{}
+	list := make([]any, 0, len(o.Tools))
+	names := make([]string, 0, len(o.Tools))
+	for _, t := range o.Tools {
+		tools[t.Name()] = t
+		list = append(list, map[string]any{"name": t.Name(), "description": t.Description(), "inputSchema": t.InputSchema()})
+		names = append(names, t.Name())
+	}
+	instructions := "Deliver content to the user's chat with these tools: " + strings.Join(names, ", ") + ". Files must be inside the shared media directory."
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/mcp" {
 			http.NotFound(w, r)
@@ -76,30 +99,39 @@ func New(o Options) http.Handler {
 			if params.ProtocolVersion == "2025-06-18" || params.ProtocolVersion == "2025-11-25" {
 				version = params.ProtocolVersion
 			}
-			rpc(w, req.ID, map[string]any{"protocolVersion": version, "capabilities": map[string]any{"tools": map[string]any{}}, "serverInfo": map[string]string{"name": "PhiRouter", "version": "0.1.0"}, "instructions": "Write files inside the shared media directory, then call send_file to deliver them to the user."}, 0, "")
+			rpc(w, req.ID, map[string]any{"protocolVersion": version, "capabilities": map[string]any{"tools": map[string]any{}}, "serverInfo": map[string]string{"name": "PhiRouter", "version": "0.1.0"}, "instructions": instructions}, 0, "")
 		case "ping":
 			rpc(w, req.ID, map[string]any{}, 0, "")
 		case "tools/list":
-			rpc(w, req.ID, map[string]any{"tools": []any{map[string]any{"name": "send_file", "description": "Send a file from the shared media directory to the user immediately.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"path": map[string]string{"type": "string"}, "caption": map[string]string{"type": "string"}}, "required": []string{"path"}, "additionalProperties": false}}}}, 0, "")
+			rpc(w, req.ID, map[string]any{"tools": list}, 0, "")
 		case "tools/call":
 			var params struct {
 				Name      string
-				Arguments struct{ Path, Caption string }
+				Arguments json.RawMessage
 			}
-			if err := json.Unmarshal(req.Params, &params); err != nil || params.Name != "send_file" || params.Arguments.Path == "" {
-				rpc(w, req.ID, nil, -32602, "Expected send_file with path and optional caption")
+			if err := json.Unmarshal(req.Params, &params); err != nil {
+				rpc(w, req.ID, nil, -32602, "Expected a tool name and arguments")
 				return
 			}
-			target := o
+			tool, ok := tools[params.Name]
+			if !ok {
+				rpc(w, req.ID, nil, -32602, "Unknown tool")
+				return
+			}
+			route := o.Route
 			if len(o.Routes) > 0 {
-				target.Route = r.Header.Get("X-PhiRouter-Route")
-				if !o.Routes[target.Route] {
+				route = r.Header.Get("X-PhiRouter-Route")
+				if !o.Routes[route] {
 					rpc(w, req.ID, nil, -32602, "Unknown backend return route")
 					return
 				}
 			}
-			err := send(r.Context(), target, params.Arguments.Path, params.Arguments.Caption)
-			text := "File sent."
+			text, err := tool.Call(r.Context(), route, params.Arguments)
+			var invalid interface{ InvalidParams() bool }
+			if errors.As(err, &invalid) && invalid.InvalidParams() {
+				rpc(w, req.ID, nil, -32602, err.Error())
+				return
+			}
 			if err != nil {
 				text = err.Error()
 			}
@@ -108,14 +140,6 @@ func New(o Options) http.Handler {
 			rpc(w, req.ID, nil, -32601, "Method not found")
 		}
 	})
-}
-func send(ctx context.Context, o Options, path, caption string) error {
-	p, err := o.Media.Inspect(path)
-	if err != nil {
-		return fmt.Errorf("invalid attachment: %w", err)
-	}
-	p.Caption = caption
-	return o.Send(ctx, core.Envelope{Route: o.Route, Parts: []core.Part{p}})
 }
 func rpc(w http.ResponseWriter, id json.RawMessage, result any, code int, message string) {
 	w.Header().Set("Content-Type", "application/json")
