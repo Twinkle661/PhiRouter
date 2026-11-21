@@ -2,11 +2,11 @@
 package mcp
 
 import (
-	"PhiRouter/internal/core"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
+	"github.com/Twinkle661/PhiRouter/internal/core"
 	"io"
 	"net/http"
 	"net/url"

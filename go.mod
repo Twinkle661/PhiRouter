@@ -1,4 +1,4 @@
-module PhiRouter
+module github.com/Twinkle661/PhiRouter
 
 go 1.26.10
 

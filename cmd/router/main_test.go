@@ -1,10 +1,10 @@
 package main
 
 import (
-	"PhiRouter/internal/core"
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/Twinkle661/PhiRouter/internal/core"
 	"os"
 	"path/filepath"
 	"strings"

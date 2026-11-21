@@ -1,11 +1,11 @@
 package router
 
 import (
-	"PhiRouter/internal/core"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Twinkle661/PhiRouter/internal/core"
 	"log/slog"
 	"strings"
 	"time"

@@ -1,11 +1,11 @@
 package pi
 
 import (
-	"PhiRouter/internal/core"
 	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/Twinkle661/PhiRouter/internal/core"
 	"io"
 	"os"
 	"path/filepath"

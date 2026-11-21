@@ -2,8 +2,8 @@
 package plugins
 
 import (
-	"PhiRouter/internal/core"
 	"context"
+	"github.com/Twinkle661/PhiRouter/internal/core"
 	"log/slog"
 	"time"
 )
