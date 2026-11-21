@@ -320,3 +320,18 @@ func TestBackendInstances(t *testing.T) {
 		t.Fatalf("env override: %v", err)
 	}
 }
+
+func TestStateDirIsRelativeToConfig(t *testing.T) {
+	path, dotenv := write(t, base)
+	c, err := Load(path, dotenv, regs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(filepath.Dir(path), "state"); c.State.Dir != want {
+		t.Fatalf("state dir %s, want %s", c.State.Dir, want)
+	}
+	path, dotenv = write(t, base+"state:\n  dir: /srv/state\n")
+	if c, err = Load(path, dotenv, regs); err != nil || c.State.Dir != "/srv/state" {
+		t.Fatalf("absolute dir changed: %s %v", c.State.Dir, err)
+	}
+}

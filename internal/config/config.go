@@ -7,6 +7,7 @@ import (
 	"gopkg.in/yaml.v3"
 	"net"
 	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"sort"
@@ -45,7 +46,8 @@ type Config struct {
 		Dir string        `yaml:"dir"`
 		TTL time.Duration `yaml:"ttl"`
 	} `yaml:"media"`
-	// State holds per-backend state directories, <dir>/<backend name>.
+	// State holds per-backend state directories, <dir>/<backend name>. A
+	// relative dir is resolved against the configuration file's directory.
 	State struct {
 		Dir string `yaml:"dir"`
 	} `yaml:"state"`
@@ -252,7 +254,7 @@ func Defaults() Config {
 	c.Stream.ShowToolCalls.Detailed = true
 	c.Stream.ShowToolCalls.MaxDetailLength = 120
 	c.Media.Dir = "/data/media"
-	c.State.Dir = "/data/state"
+	c.State.Dir = "state"
 	c.Media.TTL = 24 * time.Hour
 	c.API.Listen = "127.0.0.1:8080"
 	c.MCP.Listen = "127.0.0.1:8081"
@@ -323,6 +325,9 @@ func Load(path, dotenv string, reg Registries) (Config, error) {
 	}
 	if err = c.Validate(reg); err != nil {
 		return c, err
+	}
+	if !filepath.IsAbs(c.State.Dir) {
+		c.State.Dir = filepath.Join(filepath.Dir(path), c.State.Dir)
 	}
 	if c.Timestamp.Enabled {
 		// Validate has already checked the zone, so this cannot fail.

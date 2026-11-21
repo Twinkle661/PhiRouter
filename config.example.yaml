@@ -64,9 +64,9 @@ media:
   ttl: 24h
 
 # Per-backend state, in <dir>/<backend name> (pi's session pointer, an ACP
-# session ID).
+# session ID). Relative to this file's directory.
 state:
-  dir: /data/state
+  dir: state
 
 api:
   listen: "127.0.0.1:8080"

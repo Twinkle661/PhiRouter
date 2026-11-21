@@ -79,7 +79,9 @@ plugins/                    optional built-in hooks (prefix, ticker)
 Requirements: Docker Compose, a Telegram bot token from BotFather, your numeric Telegram user ID, and an account with a model provider supported by pi.
 
 ```sh
-cp config.example.yaml config.yaml
+mkdir router pi
+cp config.example.yaml router/config.yaml
+sudo chown -R 1000:1000 router pi   # the container runs as node (uid 1000)
 cp .env.example .env
 # Edit .env: set your bot token, user ID, and TWO different random bearer secrets
 # (e.g. `openssl rand -hex 32`).
@@ -94,8 +96,9 @@ Open a private chat with your bot and send a message. Telegram requires you to c
 
 Deployment notes:
 
-- Router and pi run in **one container** as the non-root `node` user; the router spawns pi as a child process. Config is mounted read-only.
-- The pi login, sessions, extensions and `mcp.json` live in the `pi-agent` volume; files live in the `media` volume; each backend's router-side state (pi's session pointer, an ACP session ID) lives in the `state` volume under `state.dir/<backend name>`.
+- Router and pi run in **one container** as the non-root `node` user; the router spawns pi as a child process.
+- Two kinds of host directories are bind-mounted. `./router` holds what the router persists: `config.yaml` and `state/<backend name>/` (pi's session pointer, an ACP session ID); `state.dir` is relative to the config file. Each backend's own home is mounted where that agent looks by default, e.g. `./pi` at `~/.pi/agent` for pi's login, sessions, extensions and `mcp.json`. To add Codex, install it in a derived image and uncomment the `./codex` mount; other agents work the same way.
+- Media files are temporary (`media.ttl`) and stay inside the container.
 - The injection API is reachable by sibling containers at `http://router:8080` but is **not published to the host**. To reach it from the host, add a loopback-only mapping (`127.0.0.1:8080:8080`). Never publish it on a public interface. MCP stays bound to `127.0.0.1:8081` inside the container.
 - To use provider API keys instead of interactive login, add the provider's variable (e.g. `ANTHROPIC_API_KEY`) to `.env`; Compose passes it to pi.
 - The image pins **pi 1.6.0** on the Node 22 line (pi needs Node ≥ 22.19) and builds with Go 1.26. Upgrading pi means re-checking its RPC contract and running the tests.

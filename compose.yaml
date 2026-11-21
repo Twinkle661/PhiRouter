@@ -7,16 +7,13 @@ services:
     env_file: .env
     environment:
       ROUTER_API__LISTEN: "0.0.0.0:8080"
+    # Host directories must be writable by the container's node user (uid 1000).
     volumes:
-      - pi-agent:/home/node/.pi/agent
-      - media:/data/media
-      - state:/data/state
-      - ./config.yaml:/app/config.yaml:ro
+      # Router data: config.yaml and per-backend state (session pointers).
+      - ./router:/app/router
+      # Each backend's own home, at the path the agent uses by default.
+      - ./pi:/home/node/.pi/agent
+      # - ./codex:/home/node/.codex   # Codex CLI (needs an image with codex installed)
     # Reachable by other containers on this network, not published to the host.
     expose:
       - "8080"
-
-volumes:
-  pi-agent:
-  media:
-  state:
